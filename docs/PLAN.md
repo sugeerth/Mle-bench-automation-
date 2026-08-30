@@ -117,7 +117,9 @@ usage, cost, and content-addressed pointers to `submission.csv`, `logs/`, `code/
 the proposal) intermediate checkpoints. Grading writes a separate row referencing the run —
 so re-grading after an upstream grader fix doesn't mutate run history.
 
-**Comparer.** The part people skip and then regret. See §6.
+**Comparer.** The part people skip and then regret. See §6. **Implemented** — `mlea compare`
+and `mlea power` in `src/mlea/`, the only code in this repo so far. It was built first because
+it gates whether the expensive parts are worth running at all.
 
 **Triage.** See §7.
 
@@ -238,9 +240,11 @@ Design decisions that follow:
 2. **Pair the comparison.** Compare agent A vs. B *per competition*, not two independent
    aggregate rates. Competition difficulty is the dominant variance term and pairing removes
    it. Use a paired test over per-competition medal counts.
-3. **Publish the minimum detectable effect** alongside every comparison. If a lite 3-seed
-   sweep can only detect a ~15-point shift, the report must say so — otherwise someone will
-   read a 6-point "improvement" as real.
+3. **Publish the minimum detectable effect** alongside every comparison. This is now
+   measured, not hypothetical: a 3-seed lite sweep detects a **−22.7%** regression and
+   nothing subtler; the full split detects **−12.1%**
+   ([`POWER-FINDINGS.md`](POWER-FINDINGS.md)). A 6-point "improvement" on lite is noise.
+   `mlea compare` reports the interval and refuses to hide it.
 4. **Never let a re-run replace a result.** Re-running a failed competition until it medals is
    the most natural and most corrupting thing a person can do with this system. Every run is
    recorded; aggregate metrics read *all* runs matching the key, not the latest.

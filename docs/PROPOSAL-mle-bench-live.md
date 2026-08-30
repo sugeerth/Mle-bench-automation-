@@ -125,10 +125,13 @@ Paired report: matched pre-cutoff vs post-cutoff competitions
 
 Four notes on the parts that carry risk:
 
-**Matching is the whole experiment.** A raw pre/post gap confounds contamination with difficulty
-drift — Kaggle competitions have changed character over the years. Post-cutoff competitions must
-be matched to pre-cutoff ones on modality, dataset size, team count, and metric type, and the
-comparison must be paired. Get this wrong and the number is meaningless.
+**Matching protects validity, not power.** A raw pre/post gap confounds contamination with
+difficulty drift — Kaggle competitions have changed character over the years. Post-cutoff
+competitions must be matched to pre-cutoff ones on modality, dataset size, team count, and
+metric type. [`POWER-FINDINGS.md` §2](POWER-FINDINGS.md) shows matching quality is worth only
+~11 points of power across its whole plausible range, so this is a *bias* control, not a
+variance control: if post-cutoff competitions are systematically harder, that is
+indistinguishable from contamination and no number of extra pairs fixes it.
 
 **Medal thresholds are an approximation.** Thresholds come from the real leaderboard, which was
 computed on Kaggle's test split, not our re-split. Upstream already makes this approximation, so
@@ -157,15 +160,26 @@ tier genuinely matters.
 
 ## Costs and risks
 
-Ingest and preparation are cheap — CPU and bandwidth. The cost is the runs, and it is the same
-per-run cost as any sweep. A first informative experiment is roughly **8 matched pairs × 3 seeds
-× 2 conditions ≈ 48 runs ≈ $7–9k**, or far less on the reduced budgets the time ablation already
-justifies.
+Ingest and preparation are cheap — CPU and bandwidth. The cost is the runs.
+
+⚠️ **An earlier draft costed this at 8 matched pairs ≈ 48 runs ≈ $7–9k. That design does not
+work.** Its minimum detectable effect is −54%, so it could detect a SWE-bench-sized catastrophe
+and nothing else; a −30% contamination effect would be missed 73% of the time. See
+[`POWER-FINDINGS.md` §1](POWER-FINDINGS.md).
+
+Revised: **16 matched pairs × 3 seeds ≈ 96 runs ≈ $14.4k** is the practical floor (MDE −30%),
+and 24 pairs ≈ $21.6k is where moderate effects become detectable (MDE −23%). Marginal budget
+should buy pairs, not seeds. The reduced time budgets the paper's own ablation justifies apply
+on top and cut these materially.
+
+**The binding constraint turns out to be calendar, not money.** Each post-cutoff competition
+supplies one pair and Kaggle yields ~15–30 substantive competitions a year, so 16 pairs is
+6–12 months of accumulation. Build the ingest pipeline early and run the analysis late.
 
 | Risk | Severity | Mitigation |
 | --- | --- | --- |
-| Too few new competitions → small n, wide error bars | **High** | Accumulate over time; matched pairing to cut variance; publish the MDE. Kaggle yields maybe 15–30 substantive competitions/year, so this is genuinely slow |
-| Difficulty drift confounds the gap | **High** | Explicit matching + paired tests; report matched covariates |
+| Too few new competitions → small n | **High** | Quantified: 16 pairs minimum, ~6–12 months of Kaggle output. Start ingesting now, analyse later. `mlea power` gates the decision |
+| Difficulty drift confounds the gap | **High** | Explicit matching + paired tests; report matched covariates. This is the risk matching actually addresses |
 | Cutoff dates unknown | Medium | Report as a lower bound; use conservative cutoffs |
 | Playground-series competitions inflate volume but are easier/synthetic | Medium | Tag separately, never mix into the headline split |
 | Leaderboard threshold approximation | Low | Inherited from upstream; state it |
@@ -183,9 +197,12 @@ full split75 sweeps" as the thing worth building toward. Keep anytime checkpoint
 Phase 4 triage instrumentation. Drop the obfuscation probe entirely; it was already run and
 temporal holdout supersedes it.
 
-**Cheapest first step, and it costs nothing:** re-run the paper's own obfuscation test on 3
-competitions with a current agent. If a test that returned 8.5% vs 8.4% at the floor now returns
-a real gap at 65%, that alone justifies the whole programme — and it is a weekend, not a quarter.
+**Cheapest first step, and it costs nothing:** re-run the paper's own obfuscation test with a
+current agent. Note the design constraint from [`POWER-FINDINGS.md` §6](POWER-FINDINGS.md): a
+paired test needs **at least 6 competitions** to be able to return a significant result at all,
+so the "3 competitions" an earlier draft suggested cannot work no matter how large the effect.
+Use 8–10 as a directional smoke test, and treat a non-significant result as uninformative
+rather than as evidence of no contamination.
 
 ---
 
