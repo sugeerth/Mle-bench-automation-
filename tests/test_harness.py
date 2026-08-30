@@ -288,7 +288,7 @@ def test_sweep_writes_grade_ready_jsonl(tmp_path, data_dir):
     lines = (tmp_path / "runs" / "submissions.jsonl").read_text().strip().split("\n")
     rows = [json.loads(x) for x in lines]
     assert len(rows) == 2
-    assert set(rows[0]) == {"competition_id", "submission_path"}
+    assert {"competition_id", "submission_path"} <= set(rows[0])
     assert all(os.path.exists(r["submission_path"]) for r in rows)
 
 
@@ -396,7 +396,13 @@ def test_submission_paths_in_jsonl_are_csv(tmp_path, data_dir):
         for x in (tmp_path / "runs" / "submissions.jsonl").read_text().splitlines()
     ]
     assert all(r["submission_path"].endswith(".csv") for r in rows)
-    assert all(set(r) == {"competition_id", "submission_path"} for r in rows)
+    # Upstream reads only the first two and ignores extras; ours needs the rest
+    # to map a score back to the run that produced it.
+    assert all(
+        {"competition_id", "submission_path"} <= set(r) for r in rows
+    )
+    assert all(set(r) == {"competition_id", "submission_path", "seed", "run_dir"}
+               for r in rows)
 
 
 # --- mirroring an agent's own submission path ---

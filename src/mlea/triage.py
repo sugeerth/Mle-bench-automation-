@@ -611,7 +611,11 @@ class TriageReport:
         without an entry are recorded as no-medal, which is correct: a run that
         never produced a gradeable submission did not earn one.
         """
-        medals = medals or {}
+        # Accept string keys too, so a medals map can round-trip through JSON.
+        medals = {
+            (k if isinstance(k, tuple) else tuple(k)): v
+            for k, v in (medals or {}).items()
+        }
         return [
             {
                 "competition_id": r.competition_id,

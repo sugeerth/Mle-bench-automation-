@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -24,6 +25,8 @@ from .harness import (
     resolve_competition_data_dir,
     run_sweep,
 )
+from .bench import SUITE, CompetitionSpec, make_suite
+from .grade import grade_submission
 from .report import write_report
 from .triage import triage_run_group
 
@@ -123,6 +126,210 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_selftest(args: argparse.Namespace) -> int:
+    """Exercise the whole pipeline against real, gradeable competitions.
+
+    Every other test in this repository runs against stub agents or synthetic
+    fixtures. This one generates competitions, fits real models, grades real
+    scores, classifies real failures and renders the result -- and fails loudly
+    if any stage disagrees with the others.
+    """
+    from .bench import SUITE, make_suite
+    from .compare import compare
+    from .records import RunSet
+    from .report import write_report
+    from .triage import Outcome, triage_run_group
+
+    out = Path(args.out)
+    data = out / "data"
+    specs = SUITE[: args.competitions]
+    make_suite(data, specs)
+    print(f"1. generated {len(specs)} competition(s)")
+
+    strategies = ["tuned", "linear", "constant", "broken", "silent", "crash", "hungry"]
+    marks = (1.0, 2.0, 4.0)
+    results: dict[str, dict] = {}
+    for strategy in strategies:
+        tasks = [
+            Task(spec.id, resolve_competition_data_dir(data, spec.id), seed=seed)
+            for spec in specs
+            for seed in range(args.seeds)
+        ]
+        cfg = RunConfig(
+            output_root=out / "runs" / strategy,
+            time_cap_seconds=args.time_cap,
+            checkpoint_marks=marks,
+            force=True,
+        )
+        think = "--think-seconds 0.15 " if strategy == "tuned" else ""
+        agent = CommandAgent(
+            strategy,
+            f"{sys.executable} -m mlea.baseline {think}--strategy {strategy}",
+        )
+        run_sweep(agent, tasks, cfg)
+
+        grade_dir = out / "grades" / strategy
+        rc = _cmd_grade(
+            argparse.Namespace(
+                submission=cfg.output_root / "submissions.jsonl",
+                data_root=data,
+                output_dir=grade_dir,
+                quiet=True,
+                func=None,
+            )
+        )
+        if rc != 0:
+            return rc
+        # Triage AFTER grading, so the grader's rejections are visible.
+        report = triage_run_group(cfg.output_root)
+        raw = json.loads((grade_dir / "medals.json").read_text())
+        medals = {
+            (k.rsplit("|", 1)[0], int(k.rsplit("|", 1)[1])): v for k, v in raw.items()
+        }
+        runset_path = out / f"{strategy}.json"
+        runset_path.write_text(
+            json.dumps(
+                {
+                    "label": strategy,
+                    "fingerprint": {"split_id": "synth", "container_config": "none"},
+                    "runs": report.to_runset_records(medals),
+                },
+                indent=2,
+            )
+        )
+        rs = RunSet.from_json(runset_path)
+        results[strategy] = {
+            "report": report,
+            "runset": rs,
+            "medal_rate": rs.any_medal_rate() if rs.competitions() else 0.0,
+        }
+        print(
+            f"2. {strategy:9} medal rate {results[strategy]['medal_rate']:6.1%}  "
+            f"gradeable {len(report.gradeable)}/{report.total}"
+        )
+
+    print("\n3. checking the pipeline agrees with itself")
+    problems: list[str] = []
+
+    def check(ok: bool, msg: str) -> None:
+        print(f"   {'PASS' if ok else 'FAIL'}  {msg}")
+        if not ok:
+            problems.append(msg)
+
+    check(
+        results["tuned"]["medal_rate"] > results["constant"]["medal_rate"],
+        "a real model out-medals a constant baseline",
+    )
+    check(
+        results["constant"]["medal_rate"] == 0.0,
+        "a constant baseline earns no medals",
+    )
+    for strategy, expected in (
+        ("broken", Outcome.INVALID_SUBMISSION),
+        ("silent", Outcome.NO_SUBMISSION),
+        ("crash", Outcome.CRASH),
+        ("hungry", Outcome.OOM),
+    ):
+        outcomes = {r.outcome for r in results[strategy]["report"].results}
+        check(outcomes == {expected}, f"{strategy} classifies as {expected.value}")
+    check(
+        all(
+            r.outcome is Outcome.VALID
+            for r in results["tuned"]["report"].results
+        ),
+        "every tuned run is a gradeable result",
+    )
+    curves = sum(
+        1
+        for d in (out / "runs" / "tuned").iterdir()
+        if d.is_dir() and (d / "checkpoints").is_dir()
+    )
+    check(curves > 0, f"checkpoint curves captured for {curves} tuned run(s)")
+
+    cmp = compare(results["constant"]["runset"], results["tuned"]["runset"])
+    print(f"\n4. {cmp.summary()}")
+
+    report_path = write_report(
+        out / "runs" / "tuned", out / "report.html", title="mlea selftest · tuned"
+    )
+    print(f"\n5. wrote {report_path}")
+
+    if problems:
+        print(f"\nSELFTEST FAILED: {len(problems)} check(s)", file=sys.stderr)
+        return 1
+    print("\nSELFTEST PASSED")
+    return 0
+
+
+def _cmd_bench(args: argparse.Namespace) -> int:
+    specs = SUITE[: args.count] if args.count else SUITE
+    paths = make_suite(args.out, specs)
+    print(f"generated {len(paths)} competition(s) in {args.out}")
+    for spec, path in zip(specs, paths):
+        meta = json.loads((path / "competition.json").read_text())
+        t = meta["thresholds"]
+        print(
+            f"  {spec.id:26} {spec.task:10} {spec.metric:8} "
+            f"difficulty={spec.difficulty:.2f}  oracle={meta['oracle_score']:.4f}  "
+            f"gold={t['gold']:.4f} median={t['median']:.4f} ({t['n_teams']} teams)"
+        )
+    return 0
+
+
+def _cmd_grade(args: argparse.Namespace) -> int:
+    root = Path(args.data_root)
+    out_dir = Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    reports, medals = [], {}
+    for line in Path(args.submission).read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith(("#", "//")):
+            continue
+        row = json.loads(line)
+        rep = grade_submission(row["submission_path"], root / row["competition_id"])
+        reports.append({**rep.to_dict(), "seed": row.get("seed", 0)})
+        medals[f"{row['competition_id']}|{row.get('seed', 0)}"] = rep.any_medal
+        # Feed the grader's verdict back into the run directory. Triage runs
+        # before grading and cannot otherwise tell a well-formed submission from
+        # one the grader refuses -- a file with the right rows and a wrong column
+        # name looks valid on disk and is not.
+        run_dir = row.get("run_dir")
+        if run_dir and rep.submission_exists and not rep.valid_submission:
+            meta_path = Path(run_dir) / "metadata.json"
+            if meta_path.exists():
+                try:
+                    meta = json.loads(meta_path.read_text())
+                    meta["validation_error"] = rep.error
+                    meta_path.write_text(json.dumps(meta, indent=2))
+                except (OSError, json.JSONDecodeError):
+                    pass
+
+    graded = [r for r in reports if r["valid_submission"]]
+    n_medal = sum(1 for r in reports if r["any_medal"])
+    summary = {
+        "n_submissions": len(reports),
+        "n_valid": len(graded),
+        "n_any_medal": n_medal,
+        "any_medal_rate": n_medal / len(reports) if reports else 0.0,
+        "reports": reports,
+    }
+    (out_dir / "grading_report.json").write_text(json.dumps(summary, indent=2))
+    (out_dir / "medals.json").write_text(json.dumps(medals, indent=2))
+    if getattr(args, "quiet", False):
+        return 0
+    print(f"{len(graded)}/{len(reports)} valid, {n_medal} medal(s)")
+    for r in reports:
+        score = "-" if r["score"] is None else f"{r['score']:.4f}"
+        medal = ("gold" if r["gold_medal"] else "silver" if r["silver_medal"]
+                 else "bronze" if r["bronze_medal"]
+                 else "above median" if r["above_median"] else "-")
+        note = f"  ({r['error']})" if r["error"] else ""
+        print(f"  {r['competition_id']:26} seed {r['seed']}  "
+              f"score={score:>8}  {medal}{note}")
+    print(f"\nwrote {out_dir / 'grading_report.json'}")
+    return 0
+
+
 def _cmd_triage(args: argparse.Namespace) -> int:
     report = triage_run_group(args.run_group)
     if not report.total:
@@ -135,8 +342,11 @@ def _cmd_triage(args: argparse.Namespace) -> int:
     print(report.summary())
 
     if args.emit_runset:
-        import json
-
+        medals = {}
+        if args.grades:
+            raw = json.loads(Path(args.grades).read_text())
+            medals = {tuple(k.rsplit("|", 1)[:1] + [int(k.rsplit("|", 1)[1])]): v
+                      for k, v in raw.items()}
         blob = {
             "label": args.label or Path(args.run_group).name,
             "fingerprint": {
@@ -145,14 +355,16 @@ def _cmd_triage(args: argparse.Namespace) -> int:
                 # silently compared against a sandboxed one.
                 "container_config": report.isolation(),
             },
-            "runs": report.to_runset_records(),
+            "runs": report.to_runset_records(medals),
         }
         Path(args.emit_runset).write_text(json.dumps(blob, indent=2))
         print(f"\nwrote run set -> {args.emit_runset}")
-        print(
-            "note: every run is recorded as no-medal. Fill in `any_medal` from "
-            "`mlebench grade` before comparing."
-        )
+        if not args.grades:
+            print(
+                "note: every run is recorded as no-medal. Pass --grades "
+                "<medals.json> from `mlea grade`, or fill in `any_medal` from "
+                "`mlebench grade`, before comparing."
+            )
     return 0
 
 
@@ -318,7 +530,29 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--emit-runset", help="write a run set JSON for `mlea compare`")
     t.add_argument("--split-id", default="unknown", help="split id for the run set")
     t.add_argument("--label", help="run set label (default: run group dir name)")
+    t.add_argument("--grades", help="medals.json from `mlea grade`, to fill in "
+                                    "any_medal rather than recording all as false")
     t.set_defaults(func=_cmd_triage)
+
+    b = sub.add_parser("bench", help="generate gradeable competitions, no Kaggle needed")
+    b.add_argument("--out", required=True, help="data root to generate into")
+    b.add_argument("--count", type=int, help=f"how many of the {len(SUITE)}-competition "
+                                             "suite to generate")
+    b.set_defaults(func=_cmd_bench)
+
+    g = sub.add_parser("grade", help="grade submissions against generated competitions")
+    g.add_argument("--submission", required=True, help="submissions.jsonl from `mlea run`")
+    g.add_argument("--data-root", required=True)
+    g.add_argument("--output-dir", required=True)
+    g.set_defaults(func=_cmd_grade)
+
+    st = sub.add_parser(
+        "selftest", help="run the whole pipeline against generated competitions")
+    st.add_argument("--out", default="selftest", help="working directory")
+    st.add_argument("--competitions", type=int, default=len(SUITE))
+    st.add_argument("--seeds", type=int, default=1)
+    st.add_argument("--time-cap", type=float, default=120.0)
+    st.set_defaults(func=_cmd_selftest)
 
     rp = sub.add_parser("report", help="render a run group as an HTML report")
     rp.add_argument("run_group")

@@ -16,6 +16,8 @@ from .records import (
     RunSet,
     assert_comparable,
 )
+from .bench import SUITE, CompetitionSpec, make_competition, make_suite
+from .grade import GradingReport, grade_submission, medal_ranks
 from .harness import (
     CommandAgent,
     HarnessError,
@@ -25,6 +27,7 @@ from .harness import (
     run_one,
     run_sweep,
 )
+from .metrics import METRICS, InvalidSubmission, get_metric
 from .triage import (
     Outcome,
     RetryNotAllowed,
@@ -41,6 +44,11 @@ __version__ = "0.1.0"
 __all__ = [
     "CommandAgent",
     "Comparison",
+    "CompetitionSpec",
+    "GradingReport",
+    "InvalidSubmission",
+    "METRICS",
+    "SUITE",
     "DESIGNS",
     "Design",
     "Fingerprint",

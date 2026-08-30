@@ -120,9 +120,28 @@ class ReportData:
 
     @property
     def max_time(self) -> float:
+        """Axis extent for the timeline: the data, not the cap.
+
+        Scaling to the time cap squashes every mark against the origin whenever
+        runs finish well short of it -- which is the common case, and exactly
+        when the curve is most worth reading.
+        """
+        walls = [r.wall_clock_seconds for r in self.rows if r.wall_clock_seconds > 0]
+        return max(walls) * 1.05 if walls else 1.0
+
+    @property
+    def time_cap(self) -> float | None:
         caps = [r.time_cap_seconds for r in self.rows if r.time_cap_seconds]
+        return max(caps) if caps else None
+
+    @property
+    def cap_headroom(self) -> float | None:
+        """How much of the cap the longest run actually used."""
+        cap = self.time_cap
+        if not cap:
+            return None
         walls = [r.wall_clock_seconds for r in self.rows]
-        return max(caps + walls + [1.0])
+        return (max(walls) / cap) if walls else None
 
 
 def collect(run_group: str | Path, title: str | None = None) -> ReportData:
@@ -479,6 +498,14 @@ def render_html(data: ReportData) -> str:
         )
 
     timeline, omitted = _timeline(data)
+    headroom = data.cap_headroom
+    cap_note = (
+        f" The axis spans the longest run, not the "
+        f"{_fmt_duration(data.time_cap)} cap — the longest run used "
+        f"{headroom:.0%} of it."
+        if headroom is not None and headroom < 0.5
+        else ""
+    )
     more = (
         f" Showing the {TIMELINE_MAX_ROWS} latest-changing runs; "
         f"{omitted} more are in the table below."
@@ -488,8 +515,8 @@ def render_html(data: ReportData) -> str:
     timeline_section = (
         f"<section><h2>When did each run last change its submission?</h2>"
         f'<p class="note">Checkpoint marks, available without any grading. Dots '
-        f"clustered early mean the run plateaued; a dot near the cap means it "
-        f"still wanted budget.{_e(more)}</p>"
+        f"clustered early mean the run plateaued; a dot near the right edge means "
+        f"it still wanted budget.{_e(cap_note)}{_e(more)}</p>"
         f'<div class="scroll">{timeline}</div></section>'
         if timeline
         else ""

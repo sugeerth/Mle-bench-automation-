@@ -1,4 +1,5 @@
 import json
+import sys
 
 import pytest
 
@@ -301,3 +302,92 @@ def test_no_answers_warning_for_a_flat_data_dir(tmp_path):
           "--time-cap", "10", "--out", str(tmp_path / "runs")])
     log = (tmp_path / "runs" / "c1__seed0" / "logs" / "harness.log").read_text()
     assert "prepared/private" not in log
+
+
+# --- the whole pipeline, against real gradeable competitions ---
+
+
+@posix_only
+def test_selftest_passes_end_to_end(tmp_path, capsys):
+    """The only test here that runs real models against real scoring.
+
+    Everything else in this suite uses stub agents or synthetic fixtures; this
+    generates competitions, fits models, grades scores, classifies failures and
+    checks that all four stages agree.
+    """
+    rc = main(["selftest", "--out", str(tmp_path / "st"), "--competitions", "6",
+               "--seeds", "3", "--time-cap", "180"])
+    out = capsys.readouterr().out
+    assert rc == 0, out
+    assert "SELFTEST PASSED" in out
+    assert "FAIL" not in out
+    assert (tmp_path / "st" / "report.html").exists()
+
+
+@posix_only
+def test_grading_feeds_back_into_triage(tmp_path):
+    """A submission with the right rows and a wrong column name looks valid on
+    disk. Triage can only know otherwise if grading writes its verdict back."""
+    from mlea.triage import Outcome, triage_run_group
+
+    main(["bench", "--out", str(tmp_path / "data"), "--count", "1"])
+    runs = tmp_path / "runs"
+    main(["run", "--agent-name", "broken", "--data-root", str(tmp_path / "data"),
+          "--competition", "synth-easy-binary", "--time-cap", "120",
+          "--agent-cmd", f"{sys.executable} -m mlea.baseline --strategy broken",
+          "--out", str(runs)])
+
+    before = triage_run_group(runs)
+    assert before.results[0].outcome is Outcome.VALID, "looks fine on disk"
+
+    main(["grade", "--submission", str(runs / "submissions.jsonl"),
+          "--data-root", str(tmp_path / "data"),
+          "--output-dir", str(tmp_path / "grades")])
+
+    after = triage_run_group(runs)
+    assert after.results[0].outcome is Outcome.INVALID_SUBMISSION
+
+
+@posix_only
+def test_grade_records_medals_for_a_real_model(tmp_path, capsys):
+    main(["bench", "--out", str(tmp_path / "data"), "--count", "2"])
+    runs = tmp_path / "runs"
+    main(["run", "--agent-name", "tuned", "--data-root", str(tmp_path / "data"),
+          "--competition", "synth-easy-binary", "--competition", "synth-hard-binary",
+          "--time-cap", "180",
+          "--agent-cmd", f"{sys.executable} -m mlea.baseline --strategy tuned",
+          "--out", str(runs)])
+    capsys.readouterr()
+    rc = main(["grade", "--submission", str(runs / "submissions.jsonl"),
+               "--data-root", str(tmp_path / "data"),
+               "--output-dir", str(tmp_path / "grades")])
+    assert rc == 0
+    summary = json.loads((tmp_path / "grades" / "grading_report.json").read_text())
+    assert summary["n_valid"] == 2
+    assert summary["n_any_medal"] >= 1, "a tuned ridge should medal on these"
+
+
+@posix_only
+def test_runset_carries_medals_through_to_compare(tmp_path):
+    from mlea.records import RunSet
+
+    main(["bench", "--out", str(tmp_path / "data"), "--count", "2"])
+    runs = tmp_path / "runs"
+    main(["run", "--agent-name", "tuned", "--data-root", str(tmp_path / "data"),
+          "--competition", "synth-easy-binary", "--competition", "synth-hard-binary",
+          "--time-cap", "180",
+          "--agent-cmd", f"{sys.executable} -m mlea.baseline --strategy tuned",
+          "--out", str(runs)])
+    main(["grade", "--submission", str(runs / "submissions.jsonl"),
+          "--data-root", str(tmp_path / "data"),
+          "--output-dir", str(tmp_path / "grades")])
+    main(["triage", str(runs), "--emit-runset", str(tmp_path / "rs.json"),
+          "--split-id", "synth", "--grades", str(tmp_path / "grades" / "medals.json")])
+    rs = RunSet.from_json(tmp_path / "rs.json")
+    assert rs.any_medal_rate() > 0, "medals must survive the trip into the run set"
+
+
+def test_bench_cli_reports_thresholds(tmp_path, capsys):
+    assert main(["bench", "--out", str(tmp_path / "d"), "--count", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "oracle=" in out and "gold=" in out

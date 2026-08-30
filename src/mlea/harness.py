@@ -605,6 +605,11 @@ def write_submissions_jsonl(results: Sequence[RunResult], path: Path) -> int:
                     {
                         "competition_id": r.task.competition_id,
                         "submission_path": str(r.submission_path),
+                        # Upstream reads only the two keys above and ignores the
+                        # rest; these let our own grader map a score back to the
+                        # run that produced it.
+                        "seed": r.task.seed,
+                        "run_dir": str(r.run_dir),
                     }
                 )
                 + "\n"

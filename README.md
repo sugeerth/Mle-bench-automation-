@@ -4,11 +4,64 @@ Automation harness for running [MLE-bench](https://github.com/openai/mle-bench) 
 Kaggle-competition benchmark for ML engineering agents) repeatably, cheaply, and as a
 regression signal rather than a one-off leaderboard stunt.
 
-## `mlea` — comparison and power tooling
+## `mlea` — a working eval pipeline
 
-The one implemented piece. It exists because every other component in the plan spends five
-figures per sweep, and this is what decides whether a given sweep could detect the thing it is
-being run to detect.
+Run the whole thing right now, with no Kaggle account, no credentials and no cost:
+
+```bash
+pip install -e .
+mlea selftest
+```
+
+That generates real gradeable competitions, runs real models against them, grades real scores,
+classifies real failures, compares two agents, and renders a report — then checks that all five
+stages agree with each other. It takes about a minute.
+
+```
+1. generated 6 competition(s)
+2. tuned     medal rate 100.0%  gradeable 18/18
+2. constant  medal rate   0.0%  gradeable 18/18
+2. broken    medal rate   0.0%  gradeable  0/18
+...
+3. checking the pipeline agrees with itself
+   PASS  a real model out-medals a constant baseline
+   PASS  broken classifies as invalid_submission
+   PASS  hungry classifies as oom
+   ...
+4. difference: +100.0%   p (paired perm): 0.0462  [SIGNIFICANT]
+SELFTEST PASSED
+```
+
+### Why generated competitions
+
+MLE-bench needs a Kaggle account **and** a rules-acceptance click that cannot be automated —
+upstream literally calls `webbrowser.open(...)` then `input()`. So none of this tooling could be
+exercised against anything scoreable without a human in the loop.
+
+`mlea bench` generates competitions that are synthetic but not fake: a latent function, real
+predictive signal, a held-out split the agent cannot see, a real metric, and **a leaderboard
+built by fitting actual models** — ridge regressions of varying capacity on bootstrap resamples
+— scored on the same split the agent is graded on. Medal thresholds come from that distribution
+using upstream's exact rank tiers (verified: 4,000 teams → gold at rank 18).
+
+Two properties the real benchmark does not have:
+
+- **Zero threshold-transfer bias.** Upstream compares a score computed on its own re-split
+  against a raw value from Kaggle's differently-split leaderboard. 69 of its 82 preparation
+  scripts use plain i.i.d. `train_test_split`, none stratified or time-aware, against private
+  splits that were often deliberately split by time or site — so the transfer is biased
+  *upward*, not merely noisy. Here the leaderboard is computed on the agent's own split.
+- **A known oracle.** The latent function is known, so the best achievable score is computable.
+  That is the correctness oracle whose absence makes a rolling Kaggle split infeasible, and it
+  is what lets a self-test verify the grader rather than just exercise it.
+
+They are not a substitute for MLE-bench — they are tabular, generated and small. Their job is to
+prove the plumbing works before anyone spends money.
+
+## The rest of the toolchain
+
+Everything below spends five figures per real sweep, which is why the tooling that decides
+whether a sweep is worth running came first.
 
 ```bash
 pip install -e .
@@ -141,6 +194,7 @@ Everything else here is **planning documents**.
 | [`docs/PROPOSAL-anytime-eval.md`](docs/PROPOSAL-anytime-eval.md) | Demoted — anytime checkpointing, kept as cheap triage instrumentation |
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
+| [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
 | [`docs/AGENTS.md`](docs/AGENTS.md) | Wiring a real agent in: verified commands, and the traps in each |
 
 ## Read this first
@@ -176,7 +230,9 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea run` eval harness
 - [x] `mlea report` eval-dots visualization
 - [x] Power model grounded in real published run data
-- [x] Log signatures and agent contracts verified against primary sources (241 tests total)
+- [x] Log signatures and agent contracts verified against primary sources
+- [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real (298 tests total)
 - [ ] Plan reviewed
-- [ ] Phase 0 run against real prepared data — the harness is written and tested, but has
-      only ever run stub agents. Doable for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)
+- [ ] Phase 0 against real **Kaggle** data — the pipeline now runs end to end on generated
+      competitions, but has still never touched a real competition. Doable for **$0**, see
+      [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

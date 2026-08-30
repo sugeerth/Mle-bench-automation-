@@ -258,3 +258,26 @@ def test_nice_ticks_handles_zero():
     from mlea.report import _nice_ticks
 
     assert _nice_ticks(0) == [0.0]
+
+
+def test_timeline_axis_spans_the_data_not_the_cap(tmp_path):
+    """A 24h cap with 3-second runs squashes every mark against the origin."""
+    g = tmp_path / "g"
+    g.mkdir()
+    mkrun(g, "c1", 0, submission="a\n1\n",
+          meta={"wall_clock_seconds": 3, "time_cap_seconds": 86400,
+                "checkpoints": [{"elapsed_seconds": 1, "sha256": "x", "path": "p"}]})
+    data = collect(g)
+    assert data.max_time < 10
+    assert data.time_cap == 86400
+    assert data.cap_headroom < 0.01
+    assert "used 0% of it" in render_html(data)
+
+
+def test_no_cap_note_when_runs_use_most_of_the_budget(tmp_path):
+    g = tmp_path / "g"
+    g.mkdir()
+    mkrun(g, "c1", 0, submission="a\n1\n",
+          meta={"wall_clock_seconds": 90, "time_cap_seconds": 100,
+                "checkpoints": [{"elapsed_seconds": 50, "sha256": "x", "path": "p"}]})
+    assert "The axis spans the longest run" not in render_html(collect(g))
