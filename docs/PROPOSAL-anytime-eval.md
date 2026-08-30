@@ -1,7 +1,21 @@
 # Proposal: Anytime Evaluation for MLE-bench
 
-**Status:** proposal, not yet agreed
+**Status:** ⚠️ **DEMOTED.** Superseded as the primary direction by
+[`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md). Retained as cheap Phase 4 triage
+instrumentation only.
 **Depends on:** Phase 2 of [`PLAN.md`](PLAN.md)
+
+> **Why demoted.** Checking the literature after writing this: the MLE-bench paper already ran
+> the time ablation (24 h → 100 h moves medal rate 8.7% → 11.8% on MLE-bench-30). Time scaling
+> is weak and gains land early — which is precisely the conclusion this proposal was designed to
+> establish. You can justify early stopping today by citing that result; no new instrumentation
+> programme is needed for it. The paper likewise already ran the obfuscation contamination probe
+> recorded at the bottom of this document (8.5% vs 8.4%).
+>
+> What survives is the *triage* value in §"What we get out of it" item 4 — curve shapes
+> distinguishing "ran out of clock" from "plateaued" from "overfit itself" — which is genuinely
+> useful and genuinely cheap. Build that; skip the rest. The cost-saving argument that motivated
+> the whole thing is already settled literature.
 
 ---
 
@@ -81,6 +95,9 @@ a separate labelled mode.
 
 ### 1. A defensible early-stopping policy
 
+⚠️ *Largely obsolete — the MLE-bench paper's 24 h → 100 h ablation (8.7% → 11.8%) already
+establishes that time scaling is weak. Kept for the reasoning, not as a justification to build.*
+
 The direct payoff. If the curves show that the 95th percentile of last-improvement time is
 hour 6, then a 8 h budget captures nearly all the signal at **one third the compute cost** —
 and that claim is now backed by measurement rather than hope. Applied to a full 3-seed lite
@@ -154,6 +171,12 @@ per-run cost accounting to already exist.
 
 ## Secondary idea: a contamination probe
 
+⚠️ **Superseded.** This exact test was already run in the MLE-bench paper (rewriting competition
+descriptions to remove identifying information: 8.5% vs 8.4%), and temporal holdout is a strictly
+better instrument — see [`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md). The
+interesting residual point is that the original test ran at an 8.5% medal rate, i.e. at the
+floor, where it had almost no power to detect inflation. Kept below for the reasoning.
+
 Recorded here because it's cheap to state and expensive to discover late; **not** proposed for
 implementation yet.
 
@@ -179,10 +202,11 @@ system produces.
 
 ---
 
-## Recommendation
+## Recommendation (revised)
 
-Adopt the anytime evaluation (option 1, passive snapshotting) as Phase 4. It is additive,
-comparability-preserving, roughly two weeks of work, and it directly unlocks the largest cost
-saving identified in the plan while making the regression signal meaningfully stronger.
+Build **only** the sidecar + grading fan-out, and only for its triage value — roughly one week,
+not two, since the reporting can be a single curve-shape classifier rather than a cost-Pareto
+analysis suite. Cite the paper's ablation for early stopping instead of re-deriving it.
 
-Park the contamination probe as a follow-up with its own design pass.
+Drop the obfuscation probe. The flagship direction is
+[`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md).

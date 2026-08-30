@@ -167,15 +167,20 @@ repo can call. This is where the system starts paying for itself.
 **Exit criterion:** a knowingly-worse agent (e.g. a truncated context window) is flagged as a
 regression; a knowingly-neutral change (a comment-only diff) is not.
 
-### Phase 4 — Triage + the new evaluation mode *(~3 weeks)*
+### Phase 4 — Triage *(~2 weeks)*
 
-Failure taxonomy (§7) and the anytime/cost-Pareto instrumentation described in
-[`PROPOSAL-anytime-eval.md`](PROPOSAL-anytime-eval.md).
+Failure taxonomy (§7), plus the reduced anytime checkpointing kept for curve-shape triage
+([`PROPOSAL-anytime-eval.md`](PROPOSAL-anytime-eval.md) — demoted, see that document).
 
-### Phase 5 — Full split75, scheduled *(ongoing)*
+### Phase 5 — MLE-bench-Live *(flagship, ~3–4 weeks + ongoing)*
 
-Nightly lite, weekly medium, monthly full. Only worth doing once Phases 2–3 have proven the
-numbers are stable, otherwise you are buying expensive noise.
+A rolling, contamination-controlled split built from post-cutoff Kaggle competitions. See
+[`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md). This replaces "scheduled full
+split75 sweeps" as the thing worth building toward — scheduled sweeps of a possibly-contaminated
+static benchmark are expensive noise if the validity question is unanswered.
+
+Scheduled sweeps (nightly lite, weekly medium, monthly full) remain worth running once Phases
+2–3 have proven the numbers are stable, but they are maintenance, not a destination.
 
 ---
 
@@ -279,11 +284,12 @@ should handle the common cases — they're cheaper and deterministic.
 
 | Risk | Impact | Mitigation |
 | --- | --- | --- |
+| Benchmark saturation (low split already at 80.3%) | Medium–High | Rolling split refreshes faster than agents improve |
 | Cost overrun | High | Hard budget cap in the Scheduler; tiered gating; lite-first |
 | Kaggle API / dataset drift breaks `prepare` | High | Snapshot prepared data; version it; never re-prepare mid-sweep |
 | Upstream `mlebench` changes grading | Medium | Pin the upstream commit in the dedupe key; re-grade explicitly, never implicitly |
 | Results silently non-comparable | High | Split hash + container config hash in the key; Comparer refuses mismatched comparisons |
-| Benchmark contamination (agents recall public Kaggle solutions) | Medium–High | See the probe in the proposal doc |
+| **Benchmark contamination (agents recall public Kaggle solutions)** | **High** | The 2024 check found nothing, but ran at an 8.5% medal rate where it had no power. SWE-bench shows 76–81% static vs ~23% post-cutoff. See [`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md) |
 | 3.3 TB storage + egress | Medium | Single prepared snapshot, read-only mounts, region-local workers |
 | Flaky agent runs read as regressions | Medium | Seeds ≥3, paired tests, published MDE |
 
