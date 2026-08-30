@@ -81,3 +81,46 @@ def test_compare_with_pairs(tmp_path, capsys):
     p.write_text(json.dumps([[f"p{i}", f"q{i}"] for i in range(8)]))
     assert main(["compare", str(a), str(b), "--pairs", str(p)]) == 0
     assert "matched pairs" in capsys.readouterr().out
+
+
+def _mkrun(root, name, meta, submission=None, log=""):
+    d = root / name
+    (d / "logs").mkdir(parents=True)
+    d.joinpath("metadata.json").write_text(json.dumps(meta))
+    if submission is not None:
+        (d / "submission").mkdir()
+        (d / "submission" / "submission.csv").write_text(submission)
+    if log:
+        (d / "logs" / "run.log").write_text(log)
+
+
+def test_triage_cli(tmp_path, capsys):
+    g = tmp_path / "group"
+    g.mkdir()
+    _mkrun(g, "c1", {"exit_code": 0}, submission="a,b\n1,2\n")
+    _mkrun(g, "c2", {"exit_code": 1}, log="Spot instance interruption notice")
+    assert main(["triage", str(g), "-v"]) == 0
+    out = capsys.readouterr().out
+    assert "capability signal" in out and "our fault" in out
+
+
+def test_triage_cli_empty_group(tmp_path, capsys):
+    g = tmp_path / "empty"
+    g.mkdir()
+    assert main(["triage", str(g)]) == 2
+    assert "no run directories" in capsys.readouterr().err
+
+
+def test_triage_emits_a_loadable_runset(tmp_path):
+    from mlea.records import RunSet
+
+    g = tmp_path / "group"
+    g.mkdir()
+    _mkrun(g, "c1", {"exit_code": 0}, submission="a,b\n1,2\n")
+    _mkrun(g, "c2", {"exit_code": 1}, log="preempted")
+    out = tmp_path / "rs.json"
+    assert main(["triage", str(g), "--emit-runset", str(out), "--split-id", "low"]) == 0
+    rs = RunSet.from_json(out)
+    assert rs.fingerprint.split_id == "low"
+    assert rs.n_infra_failures == 1
+    assert rs.competitions() == {"c1"}, "infra failures are excluded from capability"

@@ -13,10 +13,50 @@ being run to detect.
 ```bash
 pip install -e .
 
-mlea power --design live-gap          # can this experiment detect anything?
-mlea power --design lite-regression   # what regression size can a lite sweep catch?
+mlea triage runs/2026-08-30/ -v       # why did each run end?
+mlea power  --design live-gap         # can this experiment detect anything?
 mlea compare baseline.json candidate.json --fail-on-regression
 ```
+
+### `mlea triage` — what the medal rate is actually made of
+
+A medal rate blends genuine ML underperformance, agent bugs (malformed CSV, OOM, never
+wrote a file), and our own infra faults. Triage separates them from run artifacts, so the
+headline number means one thing instead of six:
+
+```
+6 run(s)
+  infra                     1
+  oom                       1
+  no_submission             1
+  invalid_submission        1
+  valid                     2
+
+  capability signal         2  (gradeable submissions)
+  agent bugs                3  (counted against the agent, but not ML capability)
+  our fault                 1  (excluded; retryable)
+  effective denominator     5  of 6
+
+  !! 50% of runs failed mechanically rather than on ML. The medal rate is measuring
+     plumbing, not capability -- fix these before reading anything into the score.
+```
+
+Three decisions in it worth arguing with:
+
+- **A run killed at the time cap that still left a valid `submission.csv` is a
+  result, not a failure.** MLE-bench grades whatever is on disk at the end. Getting this
+  backwards discards real results, so it is the first thing the tests pin down.
+- **Only infra failures may be retried.** `assert_retry_allowed` raises on anything else —
+  retrying an agent failure re-rolls the dice and inflates the medal rate, and that rule
+  erodes the moment someone is staring at a red dashboard.
+- **Attribution logs cannot settle is marked ambiguous, not guessed.** Exit 137 is SIGKILL,
+  sent by both OOM killers and time enforcers; with no cap hit and no OOM line, triage says
+  so and names the telemetry that would resolve it.
+
+`--emit-runset` writes a run set JSON that `mlea compare` consumes, with infra failures
+already flagged for exclusion.
+
+### `mlea power` / `mlea compare`
 
 Two behaviours worth knowing about:
 
@@ -66,6 +106,7 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 
 - [x] Plan drafted
 - [x] SOTA baseline + $0 bootstrap path documented
-- [x] `mlea` comparison + power tooling (61 tests)
+- [x] `mlea` comparison + power tooling
+- [x] `mlea triage` failure classification (105 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 (walking skeleton) implemented — can be done for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

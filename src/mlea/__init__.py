@@ -16,6 +16,16 @@ from .records import (
     RunSet,
     assert_comparable,
 )
+from .triage import (
+    Outcome,
+    RetryNotAllowed,
+    RunArtifacts,
+    TriageReport,
+    TriageResult,
+    assert_retry_allowed,
+    classify,
+    triage_run_group,
+)
 
 __version__ = "0.1.0"
 
@@ -25,12 +35,20 @@ __all__ = [
     "Design",
     "Fingerprint",
     "IncomparableError",
+    "Outcome",
     "PowerResult",
+    "RetryNotAllowed",
+    "RunArtifacts",
     "RunRecord",
     "RunSet",
+    "TriageReport",
+    "TriageResult",
     "__version__",
     "assert_comparable",
+    "assert_retry_allowed",
+    "classify",
     "compare",
+    "triage_run_group",
     "minimum_detectable_effect",
     "power_for_effect",
     "seeds_needed",

@@ -121,7 +121,7 @@ so re-grading after an upstream grader fix doesn't mutate run history.
 and `mlea power` in `src/mlea/`, the only code in this repo so far. It was built first because
 it gates whether the expensive parts are worth running at all.
 
-**Triage.** See §7.
+**Triage.** See §7. **Implemented** — `mlea triage`.
 
 ---
 
@@ -271,6 +271,21 @@ Proposed taxonomy, assigned automatically from run artifacts:
 | `oom` / `crash` | container exit code + log signature | harness or agent |
 | `infra` | node preemption, image pull failure, mount error | **us** |
 | `valid_no_medal` | graded, below bronze threshold | genuine capability signal |
+
+**Implemented** as `mlea triage` (`src/mlea/triage.py`). Two refinements the table above
+missed, both found while writing it:
+
+- `timeout_mid_train` splits in two. A run killed at the cap that *still left a valid
+  submission.csv* is a **result**, not a failure — MLE-bench grades whatever is on disk at
+  the end. Only a timeout with no gradeable artifact is a failure. Treating every timeout as
+  a failure would discard real results.
+- Some attributions are not determinable from logs. Exit 137 is SIGKILL, which both OOM
+  killers and time enforcers send; host OOM may be the agent over-allocating or us
+  oversubscribing the node; `no space left on device` may be either. These are marked
+  `ambiguous` with a note naming the telemetry that settles them, rather than guessed.
+
+`assert_retry_allowed` makes the retry rule in §3.1 a raised exception rather than a
+convention.
 
 Only `valid_no_medal` is a real capability result. Everything above it is a bug in something,
 and the report should separate the two columns rather than blending them into one percentage.

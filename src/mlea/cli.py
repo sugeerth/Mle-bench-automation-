@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 from .compare import compare
 from .power import (
@@ -15,6 +16,7 @@ from .power import (
     seeds_needed,
 )
 from .records import IncomparableError, RunSet, load_pairs
+from .triage import triage_run_group
 
 COST_PER_RUN_USD = 150.0
 """Rough cost of one 24 h reference-hardware run. See PLAN.md section 5 -- an
@@ -34,6 +36,34 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     if args.fail_on_regression and result.significant and result.difference < 0:
         print("\nregression gate: FAILED", file=sys.stderr)
         return 1
+    return 0
+
+
+def _cmd_triage(args: argparse.Namespace) -> int:
+    report = triage_run_group(args.run_group)
+    if not report.total:
+        print(f"no run directories under {args.run_group}", file=sys.stderr)
+        return 2
+    if args.verbose:
+        for r in report.results:
+            print(r)
+        print()
+    print(report.summary())
+
+    if args.emit_runset:
+        import json
+
+        blob = {
+            "label": args.label or Path(args.run_group).name,
+            "fingerprint": {"split_id": args.split_id},
+            "runs": report.to_runset_records(),
+        }
+        Path(args.emit_runset).write_text(json.dumps(blob, indent=2))
+        print(f"\nwrote run set -> {args.emit_runset}")
+        print(
+            "note: every run is recorded as no-medal. Fill in `any_medal` from "
+            "`mlebench grade` before comparing."
+        )
     return 0
 
 
@@ -154,6 +184,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit 1 on a statistically significant drop (for CI gating)",
     )
     c.set_defaults(func=_cmd_compare)
+
+    t = sub.add_parser("triage", help="classify why each run in a run group ended")
+    t.add_argument("run_group", help="run group directory (one subdir per competition)")
+    t.add_argument("-v", "--verbose", action="store_true", help="list every run")
+    t.add_argument("--emit-runset", help="write a run set JSON for `mlea compare`")
+    t.add_argument("--split-id", default="unknown", help="split id for the run set")
+    t.add_argument("--label", help="run set label (default: run group dir name)")
+    t.set_defaults(func=_cmd_triage)
 
     def add_design_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--design", help=f"preset: {', '.join(DESIGNS)}")
