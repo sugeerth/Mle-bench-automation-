@@ -138,6 +138,10 @@ single lite competition, twice, with matching output.
 The point of this phase is to discover the actual friction (image build times, mount paths,
 credential handling) before designing around imagined friction.
 
+**Phase 0 costs $0.** It can be done entirely on free infrastructure with a free LLM tier —
+see [`SOTA-AND-FREE-TIER.md`](SOTA-AND-FREE-TIER.md#part-2--running-it-for-0). There is no
+reason to provision anything before this phase has run.
+
 ### Phase 1 — Lite sweep, single node *(~1–2 weeks)*
 
 All 22 lite competitions, 1 seed, sequential or lightly parallel on one big node. Result
@@ -289,6 +293,10 @@ should handle the common cases — they're cheaper and deterministic.
 
 These need answers before Phase 2, and I'd like input on them:
 
+0. **Baseline to beat.** Current SOTA is MLEvolve at 65.3% on the full set
+   ([details](SOTA-AND-FREE-TIER.md#part-1--what-the-state-of-the-art-actually-is)). Is the
+   target to match a published system, or to track a first-party agent over time? These imply
+   different splits and very different budgets.
 1. **Where does this run?** Cloud provider and whether we have quota for 440 GB-RAM + A10-class
    instances at the parallelism Phase 2 assumes. This changes the Scheduler substantially
    (Kubernetes vs. a plain EC2/GCE pool vs. Slurm).
