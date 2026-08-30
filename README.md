@@ -13,10 +13,45 @@ being run to detect.
 ```bash
 pip install -e .
 
-mlea triage runs/2026-08-30/ -v       # why did each run end?
-mlea power  --design live-gap         # can this experiment detect anything?
-mlea compare baseline.json candidate.json --fail-on-regression
+# 1. run an agent against competitions
+mlea run --agent-cmd 'aide data_dir=$DATA_DIR ...' \
+         --data-root ~/.cache/mle-bench/data \
+         --competition-set experiments/splits/low.txt \
+         --seeds 3 --time-cap 14400 --out runs/nightly
+
+# 2. grade with upstream (the harness emits the JSONL it wants)
+mlebench grade --submission runs/nightly/submissions.jsonl
+
+# 3. what is the score actually made of?
+mlea triage runs/nightly -v --emit-runset nightly.json --split-id low
+
+# 4. did anything really change? could it even have been detected?
+mlea compare baseline.json nightly.json --fail-on-regression
+mlea power --design lite-regression
 ```
+
+### `mlea run` — the eval harness
+
+Runs an agent, enforces the time cap, and collects artifacts in exactly the layout
+`mlea triage` reads. Five commitments, each one a thing that is easy to get wrong:
+
+- **The submission on disk at the end is the result.** A run killed at its cap that still
+  left a valid `submission.csv` is graded, not discarded.
+- **Kill the process group, not the process.** Agents spawn training children; signalling
+  only the parent leaves them holding the GPU and poisoning the next run on that node.
+  There is a test that spawns a real child and asserts it dies.
+- **SIGTERM, grace period, then SIGKILL**, so an agent that traps SIGTERM gets to flush its
+  best submission.
+- **Agent stdout is never trusted for classification.** It goes to `logs/agent.log`; the
+  harness writes `logs/harness.log`. Infra signatures are read only from the latter —
+  otherwise an agent prints "Spot instance interruption" and earns itself a free retry.
+- **Terminal run directories are immutable** without an explicit `--force`.
+
+It also snapshots the running submission at wall-clock marks (`--checkpoint-marks`),
+which delivers the curve-shape triage from [the anytime
+proposal](docs/PROPOSAL-anytime-eval.md) as a side effect. Snapshotting is passive, so a
+run with it produces a byte-identical final result to one without — there is a test for
+that too.
 
 ### `mlea triage` — what the medal rate is actually made of
 
@@ -107,6 +142,8 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] Plan drafted
 - [x] SOTA baseline + $0 bootstrap path documented
 - [x] `mlea` comparison + power tooling
-- [x] `mlea triage` failure classification (105 tests total)
+- [x] `mlea triage` failure classification
+- [x] `mlea run` eval harness (155 tests total)
 - [ ] Plan reviewed
-- [ ] Phase 0 (walking skeleton) implemented — can be done for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)
+- [ ] Phase 0 run against real prepared data — the harness is written and tested, but has
+      only ever run stub agents. Doable for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

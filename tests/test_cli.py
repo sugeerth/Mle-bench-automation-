@@ -91,7 +91,8 @@ def _mkrun(root, name, meta, submission=None, log=""):
         (d / "submission").mkdir()
         (d / "submission" / "submission.csv").write_text(submission)
     if log:
-        (d / "logs" / "run.log").write_text(log)
+        # harness.log: the trusted log, where infra signatures are read from
+        (d / "logs" / "harness.log").write_text(log)
 
 
 def test_triage_cli(tmp_path, capsys):
@@ -124,3 +125,121 @@ def test_triage_emits_a_loadable_runset(tmp_path):
     assert rs.fingerprint.split_id == "low"
     assert rs.n_infra_failures == 1
     assert rs.competitions() == {"c1"}, "infra failures are excluded from capability"
+
+
+# --- `mlea run`, and the whole pipeline end to end ---
+
+import os as _os
+
+import pytest as _pytest
+
+posix_only = _pytest.mark.skipif(_os.name != "posix", reason="POSIX only")
+
+
+def _data_root(tmp_path, *competitions):
+    root = tmp_path / "data"
+    for c in competitions:
+        (root / c).mkdir(parents=True)
+        (root / c / "train.csv").write_text("id,y\n1,0\n")
+    return root
+
+
+@posix_only
+def test_run_executes_and_reports(tmp_path, capsys):
+    root = _data_root(tmp_path, "leaf-classification")
+    rc = main([
+        "run", "--agent-cmd", 'printf "id,y\\n1,0\\n" > "$SUBMISSION_PATH"',
+        "--data-root", str(root), "--competition", "leaf-classification",
+        "--time-cap", "10", "--out", str(tmp_path / "runs"),
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "1/1 run(s) produced a submission" in out
+    assert "mlebench grade --submission" in out
+
+
+@posix_only
+def test_run_warns_about_missing_sandbox(tmp_path, capsys):
+    root = _data_root(tmp_path, "c1")
+    main(["run", "--agent-cmd", "true", "--data-root", str(root),
+          "--competition", "c1", "--time-cap", "5", "--out", str(tmp_path / "r")])
+    assert "isolation=none" in capsys.readouterr().err
+
+
+def test_run_requires_competitions(tmp_path, capsys):
+    assert main(["run", "--agent-cmd", "true", "--data-root", str(tmp_path),
+                 "--out", str(tmp_path / "r")]) == 2
+    assert "--competition" in capsys.readouterr().err
+
+
+@posix_only
+def test_run_reads_a_competition_set_file(tmp_path):
+    root = _data_root(tmp_path, "c1", "c2")
+    setfile = tmp_path / "split.txt"
+    setfile.write_text("# comment\nc1\n\nc2\n")
+    main(["run", "--agent-cmd", 'printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+          "--data-root", str(root), "--competition-set", str(setfile),
+          "--time-cap", "10", "--out", str(tmp_path / "runs")])
+    assert (tmp_path / "runs" / "c1__seed0" / "metadata.json").exists()
+    assert (tmp_path / "runs" / "c2__seed0" / "metadata.json").exists()
+
+
+@posix_only
+def test_run_multiple_seeds(tmp_path):
+    root = _data_root(tmp_path, "c1")
+    main(["run", "--agent-cmd", 'printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+          "--data-root", str(root), "--competition", "c1", "--seeds", "3",
+          "--time-cap", "10", "--out", str(tmp_path / "runs")])
+    dirs = sorted(p.name for p in (tmp_path / "runs").iterdir() if p.is_dir())
+    assert dirs == ["c1__seed0", "c1__seed1", "c1__seed2"]
+
+
+@posix_only
+def test_full_pipeline_run_triage_compare(tmp_path):
+    """run -> triage -> runset -> compare, with no hand-written fixtures."""
+    from mlea.records import RunSet
+
+    root = _data_root(tmp_path, "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8")
+    comps = [f"c{i}" for i in range(1, 9)]
+    args = ["run", "--data-root", str(root), "--time-cap", "10", "--seeds", "2"]
+    for c in comps:
+        args += ["--competition", c]
+
+    # Baseline writes a submission; candidate crashes on half the competitions.
+    assert main(args + ["--agent-cmd", 'printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+                        "--out", str(tmp_path / "base")]) == 0
+    assert main(args + [
+        "--agent-cmd",
+        'case "$COMPETITION_ID" in c1|c2|c3|c4) exit 1 ;; '
+        'esac; printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+        "--out", str(tmp_path / "cand")]) == 0
+
+    for name in ("base", "cand"):
+        assert main(["triage", str(tmp_path / name),
+                     "--emit-runset", str(tmp_path / f"{name}.json"),
+                     "--split-id", "toy", "--label", name]) == 0
+
+    base = RunSet.from_json(tmp_path / "base.json")
+    cand = RunSet.from_json(tmp_path / "cand.json")
+    # Isolation was carried from the harness into the fingerprint.
+    assert base.fingerprint.container_config == "none"
+    assert len(base.runs) == 16 and len(cand.runs) == 16
+    assert main(["compare", str(tmp_path / "base.json"),
+                 str(tmp_path / "cand.json")]) == 0
+
+
+@posix_only
+def test_sandboxed_and_unsandboxed_runs_cannot_be_compared(tmp_path, capsys):
+    """The isolation level must survive all the way to the comparison guard."""
+    root = _data_root(tmp_path, "c1")
+    cmd = 'printf "a\\n1\\n" > "$SUBMISSION_PATH"'
+    main(["run", "--agent-cmd", cmd, "--data-root", str(root), "--competition", "c1",
+          "--time-cap", "10", "--isolation", "none", "--out", str(tmp_path / "a")])
+    main(["run", "--agent-cmd", cmd, "--data-root", str(root), "--competition", "c1",
+          "--time-cap", "10", "--isolation", "docker", "--out", str(tmp_path / "b")])
+    for n in ("a", "b"):
+        main(["triage", str(tmp_path / n), "--emit-runset",
+              str(tmp_path / f"{n}.json"), "--split-id", "toy"])
+    capsys.readouterr()
+    assert main(["compare", str(tmp_path / "a.json"), str(tmp_path / "b.json")]) == 2
+    assert "container_config" in capsys.readouterr().err

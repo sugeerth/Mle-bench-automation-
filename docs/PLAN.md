@@ -131,6 +131,11 @@ Each phase is independently useful; stop after any of them and you have somethin
 
 ### Phase 0 — Walking skeleton *(~1 week)*
 
+> **Partly implemented.** `mlea run` is the harness; `mlea triage` and `mlea compare` are
+> the downstream. What remains is pointing it at real prepared competition data — it has
+> only ever run stub agents.
+
+
 One agent, one competition, one seed, on one machine, end to end: prepare → run → grade →
 a row in the result store. No scheduler, no parallelism, no cloud.
 

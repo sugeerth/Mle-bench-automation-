@@ -16,6 +16,15 @@ from .records import (
     RunSet,
     assert_comparable,
 )
+from .harness import (
+    CommandAgent,
+    HarnessError,
+    RunConfig,
+    RunResult,
+    Task,
+    run_one,
+    run_sweep,
+)
 from .triage import (
     Outcome,
     RetryNotAllowed,
@@ -30,17 +39,22 @@ from .triage import (
 __version__ = "0.1.0"
 
 __all__ = [
+    "CommandAgent",
     "Comparison",
     "DESIGNS",
     "Design",
     "Fingerprint",
+    "HarnessError",
     "IncomparableError",
     "Outcome",
     "PowerResult",
     "RetryNotAllowed",
     "RunArtifacts",
+    "RunConfig",
     "RunRecord",
+    "RunResult",
     "RunSet",
+    "Task",
     "TriageReport",
     "TriageResult",
     "__version__",

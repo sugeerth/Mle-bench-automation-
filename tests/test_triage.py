@@ -52,7 +52,7 @@ def test_clean_run_with_submission_is_not_marked_truncated():
 
 def test_infra_signature_wins_over_missing_submission():
     r = classify(art(exit_code=1, has_submission=False,
-                     log_tail="... Spot instance interruption notice received"))
+                     harness_log="... Spot instance interruption notice received"))
     assert r.outcome is Outcome.INFRA
     assert r.should_retry
 
@@ -69,7 +69,7 @@ def test_infra_signature_wins_over_missing_submission():
     ],
 )
 def test_infra_signatures(log, signal):
-    r = classify(art(exit_code=1, log_tail=log))
+    r = classify(art(exit_code=1, harness_log=log))
     assert r.outcome is Outcome.INFRA
     assert r.evidence[0].signal == signal
 
@@ -77,7 +77,7 @@ def test_infra_signatures(log, signal):
 def test_infra_beats_a_gradeable_submission():
     """If the node vanished mid-write, the artifact is not trustworthy."""
     r = classify(art(has_submission=True, submission_rows=10,
-                     log_tail="preemption notice: reclaiming instance"))
+                     harness_log="preemption notice: reclaiming instance"))
     assert r.outcome is Outcome.INFRA
 
 
@@ -151,7 +151,7 @@ def test_cap_tolerance_allows_slight_undershoot():
 
 
 def test_only_infra_may_be_retried():
-    infra = classify(art(log_tail="preempted"))
+    infra = classify(art(harness_log="preempted"))
     assert_retry_allowed(infra)  # must not raise
 
 
@@ -180,7 +180,7 @@ def make_report():
         classify(art(competition_id="c1", has_submission=True, submission_rows=5)),
         classify(art(competition_id="c2", has_submission=True, submission_rows=5)),
         classify(art(competition_id="c3", exit_code=0, has_submission=False)),
-        classify(art(competition_id="c4", log_tail="preempted")),
+        classify(art(competition_id="c4", harness_log="preempted")),
     ])
 
 
@@ -231,7 +231,7 @@ def test_runset_records_mark_infra_and_medals():
 # --- directory loading ---
 
 
-def write_run(root, name, *, meta, submission=None, log=""):
+def write_run(root, name, *, meta, submission=None, log="", harness_log=""):
     d = root / name
     (d / "logs").mkdir(parents=True)
     (d / "metadata.json").write_text(json.dumps(meta))
@@ -239,7 +239,9 @@ def write_run(root, name, *, meta, submission=None, log=""):
         (d / "submission").mkdir()
         (d / "submission" / "submission.csv").write_text(submission)
     if log:
-        (d / "logs" / "run.log").write_text(log)
+        (d / "logs" / "agent.log").write_text(log)
+    if harness_log:
+        (d / "logs" / "harness.log").write_text(harness_log)
     return d
 
 
@@ -283,7 +285,8 @@ def test_triage_run_group(tmp_path):
     group = tmp_path / "group"
     group.mkdir()
     write_run(group, "c1", meta={"exit_code": 0}, submission="a,b\n1,2\n")
-    write_run(group, "c2", meta={"exit_code": 1}, log="Spot instance interruption")
+    write_run(group, "c2", meta={"exit_code": 1},
+              harness_log="Spot instance interruption")
     (group / "metadata.json").write_text("{}")  # a file, must be skipped
     rep = triage_run_group(group)
     assert rep.total == 2
@@ -293,7 +296,8 @@ def test_triage_run_group(tmp_path):
 def test_evidence_quotes_the_whole_log_line_not_the_regex():
     """A person auditing a classification wants to read the offending line."""
     r = classify(
-        art(exit_code=1, log_tail="epoch 3 ok\nstep 41: Spot Instance interruption notice\n")
+        art(exit_code=1,
+            harness_log="epoch 3 ok\nstep 41: Spot Instance interruption notice\n")
     )
     assert r.evidence[0].detail == "step 41: Spot Instance interruption notice"
     assert "{0,40}" not in r.evidence[0].detail
@@ -306,6 +310,64 @@ def test_cuda_oom_evidence_quotes_the_error_line():
 
 def test_long_evidence_lines_are_truncated():
     noise = "x" * 400
-    r = classify(art(exit_code=1, log_tail=f"{noise} preempted {noise}"))
+    r = classify(art(exit_code=1, harness_log=f"{noise} preempted {noise}"))
     assert len(r.evidence[0].detail) <= 160
     assert r.evidence[0].detail.endswith("...")
+
+
+def test_harness_error_is_our_fault():
+    r = classify(art(exit_code=127, harness_error="failed to launch agent: ENOENT"))
+    assert r.outcome is Outcome.INFRA
+    assert r.should_retry
+    assert "ENOENT" in r.evidence[0].detail
+
+
+def test_harness_error_outranks_everything_else():
+    """If the harness broke, nothing downstream describes the agent."""
+    r = classify(
+        art(exit_code=0, has_submission=True, submission_rows=10,
+            harness_error="could not write artifacts")
+    )
+    assert r.outcome is Outcome.INFRA
+
+
+# --- log injection: agent stdout must not be able to forge an infra failure ---
+
+
+@pytest.mark.parametrize(
+    "forgery",
+    [
+        "Spot Instance interruption notice",
+        "the pod was preempted",
+        "ErrImagePull",
+        "no space left on device",
+    ],
+)
+def test_agent_cannot_forge_an_infra_failure_in_its_own_output(forgery):
+    """Otherwise a crashing agent prints one line and earns a free retry."""
+    r = classify(art(exit_code=1, log_tail=f"Traceback...\n{forgery}\n"))
+    assert r.outcome is Outcome.CRASH
+    assert not r.should_retry
+
+
+def test_infra_is_detected_from_the_harness_log():
+    r = classify(art(exit_code=1, harness_log="Spot Instance interruption notice"))
+    assert r.outcome is Outcome.INFRA
+    assert r.should_retry
+
+
+def test_cuda_oom_is_still_read_from_agent_output():
+    """Agents legitimately report GPU OOM, and forging it gains them nothing:
+    OOM is agent-attributable either way."""
+    r = classify(art(exit_code=1, log_tail="RuntimeError: CUDA out of memory"))
+    assert r.outcome is Outcome.OOM
+
+
+def test_foreign_layouts_do_not_trust_agent_logs_by_default(tmp_path):
+    d = tmp_path / "c"
+    (d / "logs").mkdir(parents=True)
+    (d / "logs" / "run.log").write_text("Spot Instance interruption notice")
+    (d / "metadata.json").write_text(json.dumps({"exit_code": 1}))
+    assert classify(from_run_dir(d)).outcome is Outcome.CRASH
+    trusted = from_run_dir(d, trusted_log_names=frozenset({"run.log"}))
+    assert classify(trusted).outcome is Outcome.INFRA

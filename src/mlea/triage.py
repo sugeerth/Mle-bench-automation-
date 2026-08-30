@@ -139,6 +139,16 @@ class RunArtifacts:
     submission_rows: int | None = None
     #: Set when the grader or the upstream validation server rejected the file.
     validation_error: str | None = None
+    #: Set by the harness when it failed to run the agent at all (could not
+    #: launch, could not write artifacts). Our fault, never the agent's.
+    harness_error: str | None = None
+    #: Harness-written log. **Trusted**: infra signatures are read only from
+    #: here. Agent stdout is attacker-controlled with respect to classification.
+    harness_log: str = ""
+    #: Sandbox level the run executed under, from the harness. Part of the run's
+    #: identity: an unsandboxed run must never be compared against a sandboxed
+    #: one, so this flows into the comparison fingerprint.
+    isolation: str = "unknown"
     log_tail: str = ""
 
     @property
@@ -155,6 +165,7 @@ class TriageResult:
     seed: int
     outcome: Outcome
     evidence: tuple[Evidence, ...] = ()
+    isolation: str = "unknown"
     ambiguous: bool = False
     notes: tuple[str, ...] = ()
     #: True when the run produced a gradeable submission despite ending early.
@@ -239,10 +250,25 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
        failure. Getting this backwards would discard real results.
     3. Only when there is no gradeable submission do we diagnose why.
     """
-    log = artifacts.log_tail
+    log = artifacts.log_tail  # agent output; untrusted for infra attribution
     notes: list[str] = []
 
-    hit = _scan(log, INFRA_SIGNATURES)
+    if artifacts.harness_error is not None:
+        # The harness itself failed. Nothing downstream says anything about the
+        # agent, and this outranks even a log signature.
+        return TriageResult(
+            competition_id=artifacts.competition_id,
+            seed=artifacts.seed,
+            outcome=Outcome.INFRA,
+            evidence=(Evidence("harness-error", artifacts.harness_error),),
+            isolation=artifacts.isolation,
+        )
+
+    # Infra signatures are read ONLY from the harness's own log. An agent that
+    # prints "Spot instance interruption" to its stdout would otherwise get its
+    # failure excluded from the denominator and retried -- turning a crash into
+    # a free extra attempt.
+    hit = _scan(artifacts.harness_log, INFRA_SIGNATURES)
     if hit is not None:
         infra, matched = hit
         if infra.note:
@@ -254,6 +280,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             evidence=(Evidence(infra.signal, matched),),
             ambiguous=infra.ambiguous,
             notes=tuple(notes),
+            isolation=artifacts.isolation,
         )
 
     if artifacts.has_submission and artifacts.validation_error is None:
@@ -271,6 +298,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
                 Outcome.INVALID_SUBMISSION,
                 (Evidence("empty-submission", "submission.csv has 0 rows"),),
                 notes=tuple(notes),
+                isolation=artifacts.isolation,
             )
         return TriageResult(
             artifacts.competition_id,
@@ -278,6 +306,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             Outcome.VALID,
             notes=tuple(notes),
             truncated=truncated,
+            isolation=artifacts.isolation,
         )
 
     if artifacts.validation_error is not None:
@@ -286,6 +315,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             artifacts.seed,
             Outcome.INVALID_SUBMISSION,
             (Evidence("grader-rejected", artifacts.validation_error),),
+            isolation=artifacts.isolation,
         )
 
     # No gradeable submission. Diagnose the cause.
@@ -306,6 +336,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
                 ),
             ),
             notes=("more budget might have helped; check the run's score curve",),
+            isolation=artifacts.isolation,
         )
 
     if mem is not None:
@@ -316,6 +347,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             Outcome.OOM,
             (Evidence(mem_sig.signal, mem_matched),),
             notes=(mem_sig.note,) if mem_sig.note else (),
+            isolation=artifacts.isolation,
         )
 
     if artifacts.exit_code == EXIT_TIMEOUT:
@@ -324,6 +356,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             artifacts.seed,
             Outcome.TIMEOUT,
             (Evidence("exit-code", f"exit {EXIT_TIMEOUT} (timeout)"),),
+            isolation=artifacts.isolation,
         )
 
     if artifacts.exit_code == EXIT_SIGKILL:
@@ -338,6 +371,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
                 "send. No cap was hit and no OOM signature was logged, so this is "
                 "a guess. Resolve with container memory telemetry.",
             ),
+            isolation=artifacts.isolation,
         )
 
     if artifacts.exit_code != 0:
@@ -346,6 +380,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             artifacts.seed,
             Outcome.CRASH,
             (Evidence("exit-code", f"exit {artifacts.exit_code}"),),
+            isolation=artifacts.isolation,
         )
 
     return TriageResult(
@@ -353,6 +388,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
         artifacts.seed,
         Outcome.NO_SUBMISSION,
         (Evidence("clean-exit", "exit 0 but no submission.csv"),),
+        isolation=artifacts.isolation,
     )
 
 
@@ -392,6 +428,18 @@ class TriageReport:
     @property
     def ambiguous(self) -> list[TriageResult]:
         return [r for r in self.results if r.ambiguous]
+
+    def isolation(self) -> str:
+        """The sandbox level of the group, or ``"mixed"`` if runs disagree.
+
+        A mixed group must not be aggregated into one comparable result, and
+        naming it ``"mixed"`` makes the comparison guard reject it rather than
+        letting the inconsistency through.
+        """
+        levels = {r.isolation for r in self.results}
+        if not levels:
+            return "unknown"
+        return levels.pop() if len(levels) == 1 else "mixed"
 
     def effective_denominator(self) -> int:
         """Runs that should count toward a capability metric.
@@ -471,16 +519,33 @@ def _read_tail(path: Path, max_bytes: int = 64_000) -> str:
     return data[-max_bytes:].decode("utf-8", errors="replace")
 
 
-def from_run_dir(path: str | Path, competition_id: str | None = None) -> RunArtifacts:
-    """Build artifacts from an upstream ``run_agent.py`` competition directory.
+#: Log filenames whose contents the harness wrote and triage may trust.
+TRUSTED_LOG_NAMES = frozenset({"harness.log"})
+
+
+def from_run_dir(
+    path: str | Path,
+    competition_id: str | None = None,
+    *,
+    trusted_log_names: frozenset[str] = TRUSTED_LOG_NAMES,
+) -> RunArtifacts:
+    """Build artifacts from a run directory.
 
     Expected layout (missing pieces degrade gracefully -- a run that died early
     may have almost nothing on disk, and that absence is itself a signal)::
 
         <dir>/submission/submission.csv
-        <dir>/logs/run.log
+        <dir>/logs/harness.log   trusted: written by mlea.harness
+        <dir>/logs/agent.log     untrusted: the agent's stdout and stderr
         <dir>/metadata.json      {"exit_code":..,"wall_clock_seconds":..,
                                   "time_cap_seconds":..,"seed":..}
+
+    .. note::
+       Only logs named in ``trusted_log_names`` are scanned for infrastructure
+       signatures. Pointing triage at a foreign layout (upstream
+       ``run_agent.py`` writes a single ``run.log``) therefore detects no infra
+       failures unless you name that file as trusted -- which you should only do
+       if the agent could not write to it.
     """
     d = Path(path)
     meta = {}
@@ -501,11 +566,15 @@ def from_run_dir(path: str | Path, competition_id: str | None = None) -> RunArti
         except OSError:
             rows = None
 
-    log = ""
+    harness_log = ""
+    agent_log = ""
     logs_dir = d / "logs"
     if logs_dir.is_dir():
         for f in sorted(logs_dir.glob("*.log")):
-            log += _read_tail(f)
+            if f.name in trusted_log_names:
+                harness_log += _read_tail(f)
+            else:
+                agent_log += _read_tail(f)
 
     return RunArtifacts(
         competition_id=competition_id or meta.get("competition_id", d.name),
@@ -520,7 +589,10 @@ def from_run_dir(path: str | Path, competition_id: str | None = None) -> RunArti
         has_submission=submission.exists(),
         submission_rows=rows,
         validation_error=meta.get("validation_error"),
-        log_tail=log,
+        harness_error=meta.get("harness_error"),
+        isolation=str(meta.get("isolation", "unknown")),
+        harness_log=harness_log,
+        log_tail=agent_log,
     )
 
 

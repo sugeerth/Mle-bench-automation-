@@ -16,6 +16,13 @@ from .power import (
     seeds_needed,
 )
 from .records import IncomparableError, RunSet, load_pairs
+from .harness import (
+    DEFAULT_CHECKPOINT_MARKS,
+    CommandAgent,
+    RunConfig,
+    Task,
+    run_sweep,
+)
 from .triage import triage_run_group
 
 COST_PER_RUN_USD = 150.0
@@ -39,6 +46,72 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    data_root = Path(args.data_root)
+    competitions = args.competition
+    if args.competition_set:
+        competitions = [
+            line.strip()
+            for line in Path(args.competition_set).read_text().splitlines()
+            if line.strip() and not line.startswith("#")
+        ]
+    if not competitions:
+        print("error: give --competition or --competition-set", file=sys.stderr)
+        return 2
+
+    tasks = [
+        Task(c, data_root / c, seed=s)
+        for c in competitions
+        for s in range(args.seeds)
+    ]
+    marks = (
+        tuple(float(m) for m in args.checkpoint_marks.split(","))
+        if args.checkpoint_marks
+        else DEFAULT_CHECKPOINT_MARKS
+    )
+    config = RunConfig(
+        output_root=Path(args.out),
+        time_cap_seconds=args.time_cap,
+        isolation=args.isolation,
+        checkpoint_marks=marks,
+        force=args.force,
+    )
+    if config.isolation == "none":
+        print(
+            "WARNING: isolation=none. The agent runs with this process's "
+            "privileges and full network access, so it can retrieve public "
+            "solutions for the competition being graded. Fine for pipeline "
+            "work; do not report these as benchmark numbers.\n",
+            file=sys.stderr,
+        )
+
+    agent = CommandAgent(args.agent_name, args.agent_cmd)
+    print(f"{len(tasks)} run(s): {len(competitions)} competition(s) x {args.seeds} seed(s)")
+
+    def report(result) -> None:
+        state = (
+            "harness-error" if result.harness_error
+            else "timeout" if result.timed_out
+            else f"exit {result.exit_code}"
+        )
+        sub = "submission" if result.has_submission else "NO submission"
+        ckpt = f", {len(result.checkpoints)} checkpoint(s)" if result.checkpoints else ""
+        print(
+            f"  {result.task.slug:<50} {state:<14} "
+            f"{result.wall_clock_seconds:7.1f}s  {sub}{ckpt}"
+        )
+
+    results = run_sweep(agent, tasks, config, on_result=report)
+
+    jsonl = config.output_root / "submissions.jsonl"
+    n_sub = sum(1 for r in results if r.submission_path.exists())
+    print()
+    print(f"{n_sub}/{len(results)} run(s) produced a submission")
+    print(f"grade with : mlebench grade --submission {jsonl}")
+    print(f"triage with: mlea triage {config.output_root}")
+    return 0
+
+
 def _cmd_triage(args: argparse.Namespace) -> int:
     report = triage_run_group(args.run_group)
     if not report.total:
@@ -55,7 +128,12 @@ def _cmd_triage(args: argparse.Namespace) -> int:
 
         blob = {
             "label": args.label or Path(args.run_group).name,
-            "fingerprint": {"split_id": args.split_id},
+            "fingerprint": {
+                "split_id": args.split_id,
+                # Carried from the harness so an unsandboxed run can never be
+                # silently compared against a sandboxed one.
+                "container_config": report.isolation(),
+            },
             "runs": report.to_runset_records(),
         }
         Path(args.emit_runset).write_text(json.dumps(blob, indent=2))
@@ -184,6 +262,26 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit 1 on a statistically significant drop (for CI gating)",
     )
     c.set_defaults(func=_cmd_compare)
+
+    r = sub.add_parser("run", help="run an agent against competitions")
+    r.add_argument("--agent-cmd", required=True,
+                   help="shell command; gets DATA_DIR, SUBMISSION_PATH, LOGS_DIR, "
+                        "CODE_DIR, COMPETITION_ID, SEED, TIME_CAP_SECONDS in env "
+                        "and as {placeholders}")
+    r.add_argument("--agent-name", default="agent")
+    r.add_argument("--data-root", required=True,
+                   help="directory holding prepared competition data, one subdir each")
+    r.add_argument("--competition", action="append", default=[],
+                   help="competition id (repeatable)")
+    r.add_argument("--competition-set", help="file of competition ids, one per line")
+    r.add_argument("--seeds", type=int, default=1)
+    r.add_argument("--time-cap", type=float, default=86400.0, help="seconds per run")
+    r.add_argument("--isolation", default="none", choices=["none", "docker"])
+    r.add_argument("--checkpoint-marks", help="comma-separated seconds")
+    r.add_argument("--out", required=True, help="run group output directory")
+    r.add_argument("--force", action="store_true",
+                   help="overwrite completed runs (discards recorded results)")
+    r.set_defaults(func=_cmd_run)
 
     t = sub.add_parser("triage", help="classify why each run in a run group ended")
     t.add_argument("run_group", help="run group directory (one subdir per competition)")
