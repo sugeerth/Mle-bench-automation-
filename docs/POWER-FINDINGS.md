@@ -2,67 +2,103 @@
 
 Produced by `mlea power`. Reproduce with the commands at the bottom.
 
-> **These are model-based, not empirical.** Per-competition medal probabilities are
-> drawn from a Beta with the stated base rate and a heterogeneity (concentration)
-> of 3.0. Heterogeneity is the parameter power is most sensitive to and it is an
-> assumption — re-run with `--heterogeneity` once real per-competition rates exist.
-> Dollar figures use $150/run from [`PLAN.md` §5](PLAN.md#5-cost-model) and are
+> **Grounded in real data, not a modelling assumption.** Per-competition medal
+> probabilities are resampled from published MLE-bench runs — upstream ships raw
+> per-seed grading reports under `runs/`, git-LFS tracked (which is why they are
+> invisible to ordinary raw fetches and easy to miss). The shipped table is
+> `src/mlea/data/mlebench_per_competition_medals.csv`, 31 experiments; it is verified
+> by reproducing the paper's headline 16.9% for `models-o1-preview-aide`, and there is
+> a test that fails if it ever stops doing so.
+>
+> Dollar figures use $150/run from [`PLAN.md` §5](PLAN.md#5-cost-model) and remain
 > order-of-magnitude.
 
 ---
 
-## 1. The contamination experiment as proposed was a coin flip
+## 0. The correction that produced these numbers
 
-[`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md) costed a first experiment at
-"8 matched pairs × 3 seeds × 2 conditions ≈ 48 runs ≈ $7–9k". Its actual resolving power:
+An earlier version of this document modelled per-competition medal rates as a Beta with
+a **concentration of 3.0**, chosen by judgement. That was wrong, and wrong in the
+optimistic direction.
+
+Method-of-moments fits to the published runs, binomial noise subtracted:
+
+| Experiment | Competitions | Seeds | Mean rate | Fitted concentration |
+| --- | ---: | ---: | ---: | ---: |
+| scaffolding-gpt4o-aide | 75 | 39 | 0.087 | **0.99** |
+| models-o1-preview-aide | 75 | 21 | 0.170 | **0.80** |
+| aira-dojo | 75 | 20 | 0.316 | **0.70** |
+| pievolve | 53 | 6 | 0.803 | 0.64 |
+| famou-agent | 75 | 9 | 0.559 | 0.36 |
+
+Median **0.70** across nine experiments; the three with the most seeds give 0.99, 0.80,
+0.70. The old 3.0 understated between-competition variance by roughly a factor of four.
+
+And a Beta fits the shape poorly regardless, because the real distribution is
+**zero-inflated**, not smooth. For o1-preview with AIDE, over ~21 seeds:
+
+| Per-competition medal rate | Competitions |
+| --- | ---: |
+| **exactly 0** | **42** |
+| (0, 0.25] | 15 |
+| (0.25, 0.75] | 11 |
+| (0.75, 1) | 5 |
+| **exactly 1** | **2** |
+
+56% of competitions are *never* medalled. So the model now **resamples the observed
+rates directly** and assumes no shape at all. The Beta path survives only for
+hypothetical designs at rates nobody has published, with the default concentration
+corrected to 0.7.
+
+**Cross-check:** the corrected parametric model and the data-driven one land in the same
+place — lite MDE −20.3% (fitted Beta) vs −20.7% (empirical resample), against −23.4%
+under the old assumption. Two independent routes agreeing is the reason to believe
+either. There is a test asserting they stay within 4 points.
+
+---
+
+## 1. The contamination experiment as proposed is far worse than first thought
+
+[`PROPOSAL-mle-bench-live.md`](PROPOSAL-mle-bench-live.md) originally costed a first
+experiment at "8 matched pairs × 3 seeds ≈ 48 runs ≈ $7–9k". On the assumed model that
+looked like an MDE of −54%. On real rates:
 
 | pairs | runs | est. cost | power at −20% | at −30% | at −55% | MDE |
 | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| **8** | 48 | $7,200 | **10%** | **27%** | 83% | **−54%** |
-| 12 | 72 | $10,800 | 31% | 63% | 99% | −37% |
-| **16** | 96 | $14,400 | 48% | **80%** | 100% | **−30%** |
-| 24 | 144 | $21,600 | 70% | 96% | 100% | −23% |
-| 32 | 192 | $28,800 | 84% | 99% | 100% | −19% |
-| 48 | 288 | $43,200 | 96% | 100% | 100% | −14% |
+| **8** | 48 | $7,200 | **4%** | **14%** | 57% | **−90%** |
+| 12 | 72 | $10,800 | 24% | 55% | 97% | −40% |
+| **16** | 96 | $14,400 | 48% | **83%** | 100% | **−29%** |
+| 24 | 144 | $21,600 | 78% | 97% | 100% | −21% |
+| 32 | 192 | $28,800 | 91% | 100% | 100% | −17% |
+| 48 | 288 | $43,200 | 99% | 100% | 100% | −12% |
 
-The 8-pair design has a minimum detectable effect of **−54%**. The SWE-bench-Live gap
-is roughly −55 points. So the proposed experiment could detect a catastrophe of exactly
-that magnitude and essentially nothing else: a −30% contamination effect — which would
-still be a major finding about the benchmark — would be missed **73% of the time**.
+An MDE of **−90%** means the 8-pair design can detect essentially nothing: it would miss
+a −30% contamination effect **86%** of the time, and even a full SWE-bench-sized −55%
+collapse would be missed **43%** of the time. It is not a coin flip on the disaster case;
+it is worse than a coin flip.
 
-Spending $7.2k on a design whose only outcome is "the disaster case, maybe" is not worth
-doing. **16 pairs is the practical floor** at ~$14.4k, and 24 pairs is where the result
-starts being informative about moderate effects.
+**16 pairs remains the practical floor** (MDE −29%), and 24 pairs is where moderate
+effects become detectable. The earlier conclusion survives the correction — the
+correction just makes the rejected design look even worse.
 
 ### The binding constraint is calendar, not budget
 
-Kaggle yields perhaps 15–30 substantive competitions a year, and each post-cutoff
-competition supplies one pair. So a 16-pair experiment is roughly **6–12 months of
-accumulation**, and 24 pairs is a year or more. The rolling split has to start collecting
-long before it can answer anything — which is an argument for building the ingest
-pipeline early and running the analysis late, not for deferring the whole thing.
+Each post-cutoff competition supplies one pair, and Kaggle yields perhaps 15–30
+substantive competitions a year, so 16 pairs is **6–12 months of accumulation**. Build the
+ingest pipeline early and run the analysis late.
 
-## 2. Matching affects validity, not power — the proposal had this wrong
-
-The proposal called matched-pair quality "the whole experiment" and listed it as a High
-risk to the result. On power, that is simply not what the simulation shows:
+## 2. Matching affects validity, not power
 
 | matching sd | power at −30% | MDE |
 | ---: | ---: | ---: |
-| 0.00 (perfect) | 86% | −29% |
-| 0.10 | 84% | −29% |
-| 0.15 | 80% | −30% |
-| 0.25 (poor) | 75% | −32% |
+| 0.00 (perfect) | 87% | −27% |
+| 0.10 | 85% | −29% |
+| 0.15 | 83% | −29% |
+| 0.25 (poor) | 74% | −33% |
 
-Going from perfect matching to poor matching costs ~11 points of power. Variance here is
-dominated by between-competition heterogeneity and binomial seed noise, not by matching
-residual.
-
-**Matching still matters — for a different reason.** It protects against *bias*: if
-post-cutoff competitions are systematically harder, that difficulty difference is
-indistinguishable from contamination and the experiment returns a confidently wrong
-answer. That is a validity threat, not a variance threat, and no amount of extra pairs
-fixes it. The proposal has been corrected to say so.
+Across its whole plausible range, matching quality is worth ~13 points of power. It
+protects against **bias** — post-cutoff competitions that are systematically harder are
+indistinguishable from contamination — which no number of extra pairs fixes.
 
 ## 3. At a fixed budget, buy competitions rather than seeds
 
@@ -70,50 +106,61 @@ All rows cost 96 runs:
 
 | design | power at −30% |
 | --- | ---: |
-| 48 pairs × 1 seed | **89%** |
-| 24 pairs × 2 seeds | 86% |
-| 16 pairs × 3 seeds | 80% |
-| 12 pairs × 4 seeds | 75% |
-| 8 pairs × 6 seeds | 57% |
+| 48 pairs × 1 seed | **92%** |
+| 24 pairs × 2 seeds | 89% |
+| 16 pairs × 3 seeds | 83% |
+| 12 pairs × 4 seeds | 71% |
+| 8 pairs × 6 seeds | 40% |
 
-Power for detecting a between-arm mean shift is driven by the number of units, and the
-paired permutation test's resolution floor depends on units alone — no seed count rescues
-too few competitions (`seeds_needed` returns `None` for such designs, which is tested).
+Power for a between-arm mean shift is driven by units, and the permutation test's
+resolution floor depends on units alone.
 
-**But do not read this as "use 1 seed".** MLE-bench convention is ≥3 seeds, single-seed
-per-competition rates are 0/1 with no within-competition variance estimate, and results
-would not be comparable to published numbers. The honest reading is that seeds beyond 3
-are a poor purchase for *this* question, and marginal budget should go to breadth.
+**But §4 is the reason not to read this as "use 1 seed".**
 
-## 4. Regression gating: what a lite sweep can actually catch
+## 4. Seeds are not optional, and the data says how many
+
+Directly from the published runs — the fraction of competitions where the same agent
+does *not* get the same answer on every seed:
+
+| Experiment | Seeds run | Non-unanimous competitions | Expected flips at 3 seeds |
+| --- | ---: | ---: | ---: |
+| models-o1-preview-aide | ~21 | 31/75 (**41%**) | 13.5/75 (18%) |
+| aira-dojo | ~20 | 39/75 (**52%**) | 19.0/75 (25%) |
+| scaffolding-gpt4o-aide | ~39 | 21/75 (**28%**) | 8.7/75 (12%) |
+
+**Between a quarter and a half of competitions are genuinely unstable across seeds.** At
+the conventional 3 seeds, 12–25% of competitions would be expected to disagree with
+themselves. A single-seed sweep is not a cheaper measurement of the same thing — it is a
+coin flip on a fifth of the benchmark. Spend marginal budget on units, but never below 3
+seeds.
+
+## 5. Regression gating: what a sweep can actually catch
 
 | design | units | seeds | est. cost | MDE (drop) |
 | --- | ---: | ---: | ---: | ---: |
-| lite-regression | 22 | 3 | $19,800 | **−22.7%** |
-| full-regression | 75 | 3 | $67,500 | **−12.1%** |
+| lite-regression | 22 | 3 | $19,800 | **−20.7%** |
+| full-regression | 75 | 3 | $67,500 | **−9.4%** |
+| o1-preview-full | 75 | 3 | $67,500 | −21.5% |
 
-A 3-seed lite sweep detects roughly a **23-point** regression and nothing subtler. This
-is the quantified version of [`PLAN.md` §6](PLAN.md#6-comparing-two-agents-without-fooling-yourself):
-a 6-point "improvement" on lite is noise, and reporting it as a result is wrong. Every
-comparison must publish its MDE alongside the difference, which `mlea compare` does.
+A 3-seed lite sweep detects roughly a **21-point** regression and nothing subtler — the
+quantified form of [`PLAN.md` §6](PLAN.md#6-comparing-two-agents-without-fooling-yourself).
+The third row is the same design at the paper's 16.9% baseline: detecting a *drop* is much
+harder near the floor, because there is little left to lose.
 
-## 5. Drops are easier to detect than gains near a high base rate
+## 6. Drops are easier to detect than gains near a high base rate
 
-Medal probability is capped at 1. At the 80.3% lite base rate, an improvement is squashed
-by that ceiling while an equal-sized regression is fully visible — on lite, a −22.7% drop
-is detectable at 80% power while **no** improvement reaches 80% power at any effect size.
+Medal probability is capped at 1. At the lite pool's 77% mean, a regression is fully
+visible while an improvement is squashed by the ceiling — on lite, **no** improvement
+reaches 80% power at any effect size. Convenient, since regressions and contamination
+gaps are both drops, but it means "we could not detect an improvement" is nearly
+uninformative on lite.
 
-Convenient, since regressions and contamination gaps are both drops. But it means
-"we could not detect an improvement" is close to uninformative on lite, and demonstrating
-that an agent got *better* needs the full split or a lower-base-rate subset.
+## 7. Designs below 6 units cannot produce a significant result at all
 
-## 6. Designs below 6 units cannot produce a significant result at all
-
-A paired sign-flip test over `n` units has a p-value floor of `3/(2ⁿ+1)`. At n=5 that is
-0.091 and at n=4 it is 0.176 — above α=0.05 regardless of effect size. Such a design
-cannot return a significant result however large the true difference. `mlea` flags this
+A paired sign-flip test over `n` units has a p-value floor of `3/(2ⁿ+1)`: 0.091 at n=5,
+0.176 at n=4 — above α=0.05 whatever the effect. `mlea` flags this
 (`underpowered_by_construction`) rather than reporting a non-significant p-value that
-looks like evidence of no effect.
+reads like evidence of no effect.
 
 ---
 
@@ -129,8 +176,11 @@ mlea power --design live-gap --units 16 --effect -0.30
 mlea seeds --design live-gap --units 16 --effect -0.30
 ```
 
-## What would change these numbers
+## What would still change these numbers
 
-The heterogeneity assumption is the big one. After the first real lite sweep, fit
-per-competition medal rates and re-run every number here — if competitions are more
-uniform than assumed, all MDEs improve; if more polarised, they get worse.
+The reference arm. All presets resample `pievolve` (mean 0.803, closest published run to
+current SOTA territory), which has only ~6 seeds per competition — so its per-competition
+rates carry real binomial noise, which inflates apparent heterogeneity somewhat. The
+high-seed experiments are all much weaker agents. **A high-seed run of a current
+frontier agent would be the single most valuable input to this document**, and none is
+published.

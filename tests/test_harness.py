@@ -352,3 +352,48 @@ def test_agent_stdout_and_harness_log_are_separate_files(tmp_path, data_dir):
     assert "hello" in (r.run_dir / "logs" / "agent.log").read_text()
     assert "hello" not in (r.run_dir / "logs" / "harness.log").read_text()
     assert "[mlea]" in (r.run_dir / "logs" / "harness.log").read_text()
+
+
+# --- upstream layout, verified against openai/mle-bench source ---
+
+
+def test_prepared_layout_resolves_to_public_not_the_competition_dir(tmp_path):
+    """`mlebench prepare` writes <id>/prepared/{public,private}. Handing an agent
+    the competition dir would hand it prepared/private -- the answers."""
+    from mlea.harness import resolve_competition_data_dir
+
+    root = tmp_path / "data"
+    (root / "leaf-classification" / "prepared" / "public").mkdir(parents=True)
+    (root / "leaf-classification" / "prepared" / "private").mkdir(parents=True)
+    (root / "leaf-classification" / "raw").mkdir(parents=True)
+    resolved = resolve_competition_data_dir(root, "leaf-classification")
+    assert resolved.name == "public"
+    assert resolved.parent.name == "prepared"
+    assert "private" not in str(resolved)
+
+
+def test_flat_layout_still_works(tmp_path):
+    root = tmp_path / "data"
+    (root / "c1").mkdir(parents=True)
+    from mlea.harness import resolve_competition_data_dir
+
+    assert resolve_competition_data_dir(root, "c1") == (root / "c1").resolve() or \
+        resolve_competition_data_dir(root, "c1") == root / "c1"
+
+
+def test_agent_dir_is_exported(tmp_path, data_dir):
+    """Upstream's agent images export AGENT_DIR alongside the other three."""
+    r = run_one(CommandAgent("e", 'echo "AGENT_DIR=$AGENT_DIR"; ' + WRITE_SUB),
+                task(data_dir), cfg(tmp_path))
+    assert "AGENT_DIR=" in (r.run_dir / "logs" / "agent.log").read_text()
+
+
+def test_submission_paths_in_jsonl_are_csv(tmp_path, data_dir):
+    """Upstream silently scores a non-.csv submission_path as no-submission."""
+    results = run_sweep(CommandAgent("s", WRITE_SUB), [task(data_dir)], cfg(tmp_path))
+    rows = [
+        json.loads(x)
+        for x in (tmp_path / "runs" / "submissions.jsonl").read_text().splitlines()
+    ]
+    assert all(r["submission_path"].endswith(".csv") for r in rows)
+    assert all(set(r) == {"competition_id", "submission_path"} for r in rows)

@@ -129,7 +129,7 @@ Four notes on the parts that carry risk:
 difficulty drift — Kaggle competitions have changed character over the years. Post-cutoff
 competitions must be matched to pre-cutoff ones on modality, dataset size, team count, and
 metric type. [`POWER-FINDINGS.md` §2](POWER-FINDINGS.md) shows matching quality is worth only
-~11 points of power across its whole plausible range, so this is a *bias* control, not a
+~13 points of power across its whole plausible range, so this is a *bias* control, not a
 variance control: if post-cutoff competitions are systematically harder, that is
 indistinguishable from contamination and no number of extra pairs fixes it.
 
@@ -162,14 +162,16 @@ tier genuinely matters.
 
 Ingest and preparation are cheap — CPU and bandwidth. The cost is the runs.
 
-⚠️ **An earlier draft costed this at 8 matched pairs ≈ 48 runs ≈ $7–9k. That design does not
-work.** Its minimum detectable effect is −54%, so it could detect a SWE-bench-sized catastrophe
-and nothing else; a −30% contamination effect would be missed 73% of the time. See
-[`POWER-FINDINGS.md` §1](POWER-FINDINGS.md).
+⚠️ **An earlier draft costed this at 8 matched pairs ≈ 48 runs ≈ $7–9k. That design detects
+essentially nothing.** Measured against real published per-competition rates rather than an
+assumed distribution, its minimum detectable effect is **−90%**: it would miss a −30%
+contamination effect 86% of the time, and miss even a full SWE-bench-sized −55% collapse 43%
+of the time. See [`POWER-FINDINGS.md` §1](POWER-FINDINGS.md).
 
-Revised: **16 matched pairs × 3 seeds ≈ 96 runs ≈ $14.4k** is the practical floor (MDE −30%),
-and 24 pairs ≈ $21.6k is where moderate effects become detectable (MDE −23%). Marginal budget
-should buy pairs, not seeds. The reduced time budgets the paper's own ablation justifies apply
+Revised: **16 matched pairs × 3 seeds ≈ 96 runs ≈ $14.4k** is the practical floor (MDE −29%),
+and 24 pairs ≈ $21.6k is where moderate effects become detectable (MDE −21%). Marginal budget
+buys pairs, not seeds — but never below 3 seeds, since 41% of competitions are non-unanimous
+across seeds even for a single agent. The reduced time budgets the paper's own ablation justifies apply
 on top and cut these materially.
 
 **The binding constraint turns out to be calendar, not money.** Each post-cutoff competition

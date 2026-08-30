@@ -21,6 +21,7 @@ from .harness import (
     CommandAgent,
     RunConfig,
     Task,
+    resolve_competition_data_dir,
     run_sweep,
 )
 from .report import write_report
@@ -51,17 +52,20 @@ def _cmd_run(args: argparse.Namespace) -> int:
     data_root = Path(args.data_root)
     competitions = args.competition
     if args.competition_set:
+        # More lenient than upstream, which does a bare splitlines() and turns a
+        # blank line or a comment into a competition id. A file that works here
+        # may still break `mlebench prepare --list`; emit bare ids for that.
         competitions = [
             line.strip()
             for line in Path(args.competition_set).read_text().splitlines()
-            if line.strip() and not line.startswith("#")
+            if line.strip() and not line.lstrip().startswith("#")
         ]
     if not competitions:
         print("error: give --competition or --competition-set", file=sys.stderr)
         return 2
 
     tasks = [
-        Task(c, data_root / c, seed=s)
+        Task(c, resolve_competition_data_dir(data_root, c), seed=s)
         for c in competitions
         for s in range(args.seeds)
     ]
@@ -108,7 +112,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     n_sub = sum(1 for r in results if r.submission_path.exists())
     print()
     print(f"{n_sub}/{len(results)} run(s) produced a submission")
-    print(f"grade with : mlebench grade --submission {jsonl}")
+    # --output-dir is required by upstream, not optional; without it the
+    # command exits on argparse. It also does not create parent directories.
+    print(
+        f"grade with : mlebench grade --submission {jsonl} "
+        f"--output-dir {config.output_root / 'grades'}"
+    )
     print(f"triage with: mlea triage {config.output_root}")
     return 0
 
@@ -281,7 +290,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "and as {placeholders}")
     r.add_argument("--agent-name", default="agent")
     r.add_argument("--data-root", required=True,
-                   help="directory holding prepared competition data, one subdir each")
+                   help="mlebench data dir (default ~/.cache/mle-bench/data). Each "
+                        "competition resolves to <root>/<id>/prepared/public when "
+                        "that exists, so the agent never sees prepared/private")
     r.add_argument("--competition", action="append", default=[],
                    help="competition id (repeatable)")
     r.add_argument("--competition-set", help="file of competition ids, one per line")

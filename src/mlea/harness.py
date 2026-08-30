@@ -58,6 +58,41 @@ class HarnessError(RuntimeError):
     """Raised for harness faults, distinct from anything the agent did."""
 
 
+def resolve_competition_data_dir(data_root: str | Path, competition_id: str) -> Path:
+    """Find a competition's agent-visible data directory under ``data_root``.
+
+    Upstream ``mlebench prepare`` writes
+    ``<data-dir>/<competition-id>/{raw,prepared/public,prepared/private}``, and
+    the agent is only ever shown ``prepared/public`` -- ``prepared/private``
+    holds the answers and is mounted root-only. Pointing an agent at the
+    competition directory itself would hand it the labels.
+
+    Falls back to a flat ``<data_root>/<competition-id>`` layout, which is what
+    a hand-assembled or test fixture directory looks like.
+
+    .. warning::
+       In the prepared layout ``prepared/private`` -- which holds the answers --
+       is a *sibling* of the directory returned here. Upstream keeps the agent
+       away from it by running in a container that mounts private at an
+       unrelated path with mode 700. With ``isolation="none"`` there is no such
+       boundary: the answers are one ``..`` away. :func:`run_one` warns loudly
+       when it sees this, and the results of such a run must never be reported.
+    """
+    comp = Path(data_root) / competition_id
+    public = comp / "prepared" / "public"
+    if public.is_dir():
+        return public
+    return comp
+
+
+def answers_reachable(data_dir: Path) -> bool:
+    """True when the private answers sit beside the agent's data directory.
+
+    Only meaningful for ``isolation="none"``; a container makes it moot.
+    """
+    return (Path(data_dir).parent / "private").is_dir()
+
+
 @dataclass(frozen=True)
 class Task:
     """One competition to run, with prepared data already on disk."""
@@ -345,6 +380,13 @@ def run_one(agent: Agent, task: Task, config: RunConfig) -> RunResult:
     subs["time_cap_seconds"] = str(int(config.time_cap_seconds))
     env = os.environ.copy()
     env.update({k.upper(): v for k, v in subs.items()})
+    # Upstream's own agent images additionally export AGENT_DIR (see
+    # agents/.shared_env). Upstream does NOT export DATA_DIR -- it hardcodes the
+    # read-only mount at /home/data and tells the agent about it in
+    # instructions.txt. We export DATA_DIR because without a container there is
+    # no fixed mount point to hardcode; agents ported from upstream will expect
+    # /home/data, so a port needs one line of glue.
+    env["AGENT_DIR"] = str(ws.root)
     env.update(config.env)
 
     command = list(agent.build_command(task, ws))
@@ -372,6 +414,14 @@ def run_one(agent: Agent, task: Task, config: RunConfig) -> RunResult:
         if config.isolation == "none":
             log("[mlea] WARNING: no sandbox; the agent has network access and "
                 "could retrieve public solutions for this competition")
+            if answers_reachable(task.data_dir):
+                log(
+                    "[mlea] WARNING: prepared/private is a sibling of the data "
+                    "directory and nothing prevents the agent reading it. "
+                    "Upstream mounts the answers at an unrelated path, mode 700; "
+                    "without a container there is no such boundary. Treat any "
+                    "score from this run as void."
+                )
         log(f"[mlea] agent={getattr(agent, 'name', '?')} argv={len(command)} token(s)")
 
         try:
@@ -487,6 +537,11 @@ def run_sweep(
 def write_submissions_jsonl(results: Sequence[RunResult], path: Path) -> int:
     """Write the JSONL that upstream ``mlebench grade`` consumes.
 
+    Schema verified against ``mlebench/grade.py``: only ``competition_id`` and
+    ``submission_path`` are read, and extra keys are ignored. The path must end
+    in ``.csv`` -- upstream scores any other suffix as "no submission" with only
+    a warning, so a wrong extension fails silently rather than loudly.
+
     Only runs with a submission on disk are listed; there is nothing to grade
     otherwise. Returns the number of rows written.
     """
@@ -509,6 +564,8 @@ def write_submissions_jsonl(results: Sequence[RunResult], path: Path) -> int:
 
 __all__ = [
     "Agent",
+    "answers_reachable",
+    "resolve_competition_data_dir",
     "Checkpoint",
     "CommandAgent",
     "DEFAULT_CHECKPOINT_MARKS",

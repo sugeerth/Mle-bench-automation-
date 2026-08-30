@@ -242,12 +242,14 @@ statistics here are genuinely nasty and deserve explicit design attention:
 Design decisions that follow:
 
 1. **Report mean ± standard error over seeds**, matching upstream, so numbers stay comparable.
+   Never below 3 seeds: in the published runs, **41%** of competitions are non-unanimous
+   across seeds for a single agent ([`POWER-FINDINGS.md` §4](POWER-FINDINGS.md)).
 2. **Pair the comparison.** Compare agent A vs. B *per competition*, not two independent
    aggregate rates. Competition difficulty is the dominant variance term and pairing removes
    it. Use a paired test over per-competition medal counts.
 3. **Publish the minimum detectable effect** alongside every comparison. This is now
-   measured, not hypothetical: a 3-seed lite sweep detects a **−22.7%** regression and
-   nothing subtler; the full split detects **−12.1%**
+   measured against real published per-competition rates, not hypothetical: a 3-seed lite
+   sweep detects a **−20.7%** regression and nothing subtler; the full split detects **−9.4%**
    ([`POWER-FINDINGS.md`](POWER-FINDINGS.md)). A 6-point "improvement" on lite is noise.
    `mlea compare` reports the interval and refuses to hide it.
 4. **Never let a re-run replace a result.** Re-running a failed competition until it medals is

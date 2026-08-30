@@ -123,8 +123,12 @@ Two behaviours worth knowing about:
   p-value floor above 0.05 — no effect size can make it significant. That is reported, rather
   than surfacing as a non-significant p-value that reads like evidence of no effect.
 
-It found that the contamination experiment proposed in this repo was underpowered by roughly
-a factor of two before a dollar was spent on it. See [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md).
+Power is computed against **real published per-competition medal rates**, not an assumed
+distribution — upstream ships raw per-seed grading reports under `runs/`, git-LFS tracked and
+easy to miss. The shipped table verifies itself by reproducing the paper's headline 16.9%.
+
+It found that the contamination experiment proposed in this repo detects essentially nothing
+(MDE **−90%**) before a dollar was spent on it. See [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md).
 
 Everything else here is **planning documents**.
 
@@ -164,7 +168,8 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea` comparison + power tooling
 - [x] `mlea triage` failure classification
 - [x] `mlea run` eval harness
-- [x] `mlea report` eval-dots visualization (185 tests total)
+- [x] `mlea report` eval-dots visualization
+- [x] Power model grounded in real published run data (206 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 run against real prepared data — the harness is written and tested, but has
       only ever run stub agents. Doable for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

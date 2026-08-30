@@ -15,6 +15,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from .reference import LITE_COMPETITIONS, reference_rates
 from .stats import permutation_pvalues, sign_matrix, smallest_detectable_pvalue
 
 
@@ -22,12 +23,23 @@ from .stats import permutation_pvalues, sign_matrix, smallest_detectable_pvalue
 class Design:
     """A sweep design to be evaluated for power.
 
-    ``base_rate`` and ``heterogeneity`` describe the baseline arm as a Beta
-    distribution over per-competition medal probabilities. Heterogeneity is the
-    Beta concentration: low values mean competitions are near-always or
-    near-never won (which is what MLE-bench actually looks like), high values
-    mean they are all of similar difficulty. It is the parameter that most
-    affects power, and it is an assumption -- vary it.
+    Two ways to describe the baseline arm.
+
+    **Preferred: ``reference``** names a published experiment whose real
+    per-competition medal rates are resampled (see :mod:`mlea.reference`). This
+    removes the parametric assumption entirely and is what the presets use.
+
+    **Fallback: ``base_rate`` + ``heterogeneity``** model the arm as a Beta,
+    for hypothetical designs at rates nobody has published. ``heterogeneity`` is
+    the Beta concentration -- low means competitions are near-always or
+    near-never won. It is the parameter power is most sensitive to, and an
+    earlier default of 3.0 was wrong by roughly a factor of four in the
+    optimistic direction: method-of-moments fits to the published runs give
+    0.99, 0.80 and 0.70 for the three experiments with the most seeds (median
+    0.70 across nine), so that is the default now. Even so, a Beta fits poorly
+    -- the real distribution is zero-inflated, with 42 of 75 competitions never
+    medalled in 21 seeds for o1-preview -- which is why ``reference`` is
+    preferred.
 
     ``matching_sd`` is 0 for a same-competition paired design. For the matched
     pre/post-cutoff design it is the residual sd in baseline difficulty between
@@ -38,10 +50,19 @@ class Design:
     name: str
     n_units: int
     n_seeds: int
-    base_rate: float
-    heterogeneity: float = 3.0
+    base_rate: float = 0.5
+    heterogeneity: float = 0.7
     matching_sd: float = 0.0
     description: str = ""
+    #: Published experiment to resample real per-competition rates from.
+    reference: str | None = None
+    #: Restrict the reference pool to a split (e.g. the 22 lite competitions).
+    reference_split: frozenset[str] | None = None
+
+    def baseline_pool(self) -> tuple[float, ...] | None:
+        if self.reference is None:
+            return None
+        return reference_rates(self.reference, competitions=self.reference_split)
 
     def cost_runs(self) -> int:
         """Total agent runs: both arms, every unit, every seed."""
@@ -81,10 +102,18 @@ def _simulate_diffs(
     so the reported power averages over which competitions you happen to draw,
     rather than conditioning on one lucky set.
     """
-    conc = max(design.heterogeneity, 1e-6)
-    a = max(design.base_rate * conc, 1e-6)
-    b = max((1.0 - design.base_rate) * conc, 1e-6)
-    p_base = rng.beta(a, b, size=(n_sims, design.n_units))
+    pool = design.baseline_pool()
+    if pool is not None:
+        # Resample observed per-competition rates. No distributional assumption:
+        # the U-shape, the zero inflation and the ceiling all come along for free.
+        p_base = rng.choice(
+            np.asarray(pool, dtype=float), size=(n_sims, design.n_units), replace=True
+        )
+    else:
+        conc = max(design.heterogeneity, 1e-6)
+        a = max(design.base_rate * conc, 1e-6)
+        b = max((1.0 - design.base_rate) * conc, 1e-6)
+        p_base = rng.beta(a, b, size=(n_sims, design.n_units))
 
     p_a = p_base
     p_b = p_base + effect
@@ -213,29 +242,33 @@ def seeds_needed(
     return None
 
 
-#: Designs grounded in real numbers, for the CLI. Base rates come from MLEvolve
-#: (65.3% full set, 80.3% low/lite); the SWE-bench-Live gap (~55 points) is the
-#: reference effect size for the contamination experiment.
+#: Presets, all resampling real per-competition rates rather than assuming a
+#: shape. ``pievolve`` is the reference arm: at 0.80 mean it is the closest
+#: published run to current SOTA territory (MLEvolve reports 65.3% full / 80.3%
+#: low). The SWE-bench-Live gap (~55 points) is the effect size the
+#: contamination experiment needs to resolve.
 DESIGNS: dict[str, Design] = {
     "lite-regression": Design(
         name="lite-regression",
         n_units=22,
         n_seeds=3,
-        base_rate=0.803,
+        reference="pievolve",
+        reference_split=LITE_COMPETITIONS,
         description="Detect an agent regression on the 22-competition lite split.",
     ),
     "full-regression": Design(
         name="full-regression",
         n_units=75,
         n_seeds=3,
-        base_rate=0.653,
+        reference="pievolve",
         description="Detect an agent regression on the full 75-competition split.",
     ),
     "live-gap": Design(
         name="live-gap",
         n_units=8,
         n_seeds=3,
-        base_rate=0.803,
+        reference="pievolve",
+        reference_split=LITE_COMPETITIONS,
         matching_sd=0.15,
         description=(
             "Pre/post-cutoff contamination gap, 8 matched pairs "
@@ -246,9 +279,17 @@ DESIGNS: dict[str, Design] = {
         name="live-gap-16",
         n_units=16,
         n_seeds=3,
-        base_rate=0.803,
+        reference="pievolve",
+        reference_split=LITE_COMPETITIONS,
         matching_sd=0.15,
         description="Pre/post-cutoff contamination gap, 16 matched pairs.",
+    ),
+    "o1-preview-full": Design(
+        name="o1-preview-full",
+        n_units=75,
+        n_seeds=3,
+        reference="models-o1-preview-aide",
+        description="Full split at the paper's headline 16.9% baseline.",
     ),
 }
 

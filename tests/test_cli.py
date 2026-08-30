@@ -243,3 +243,61 @@ def test_sandboxed_and_unsandboxed_runs_cannot_be_compared(tmp_path, capsys):
     capsys.readouterr()
     assert main(["compare", str(tmp_path / "a.json"), str(tmp_path / "b.json")]) == 2
     assert "container_config" in capsys.readouterr().err
+
+
+@posix_only
+def test_grade_hint_includes_required_output_dir(tmp_path, capsys):
+    """`mlebench grade` requires --output-dir; without it the command exits."""
+    root = _data_root(tmp_path, "c1")
+    main(["run", "--agent-cmd", 'printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+          "--data-root", str(root), "--competition", "c1",
+          "--time-cap", "10", "--out", str(tmp_path / "runs")])
+    out = capsys.readouterr().out
+    assert "--submission" in out and "--output-dir" in out
+
+
+@posix_only
+def test_run_uses_the_prepared_public_dir(tmp_path):
+    """A real mlebench data root must resolve past prepared/ to public/."""
+    root = tmp_path / "data"
+    pub = root / "c1" / "prepared" / "public"
+    pub.mkdir(parents=True)
+    (pub / "train.csv").write_text("id,y\n1,0\n")
+    (root / "c1" / "prepared" / "private").mkdir(parents=True)
+    (root / "c1" / "prepared" / "private" / "test.csv").write_text("secret\n")
+    rc = main(["run", "--agent-cmd",
+               'test -f "$DATA_DIR/train.csv" && echo "at:$DATA_DIR" '
+               '&& printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+               "--data-root", str(root), "--competition", "c1",
+               "--time-cap", "10", "--out", str(tmp_path / "runs")])
+    assert rc == 0
+    run_dir = tmp_path / "runs" / "c1__seed0"
+    assert json.loads((run_dir / "metadata.json").read_text())["exit_code"] == 0
+    assert "prepared/public" in (run_dir / "logs" / "agent.log").read_text()
+
+
+@posix_only
+def test_unsandboxed_run_warns_that_answers_are_reachable(tmp_path):
+    """prepared/private is a sibling of public; without a container the agent
+    can simply read it. Upstream mounts it elsewhere, mode 700."""
+    root = tmp_path / "data"
+    pub = root / "c1" / "prepared" / "public"
+    pub.mkdir(parents=True)
+    (pub / "train.csv").write_text("id,y\n1,0\n")
+    (root / "c1" / "prepared" / "private").mkdir(parents=True)
+    main(["run", "--agent-cmd", 'printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+          "--data-root", str(root), "--competition", "c1",
+          "--time-cap", "10", "--out", str(tmp_path / "runs")])
+    log = (tmp_path / "runs" / "c1__seed0" / "logs" / "harness.log").read_text()
+    assert "prepared/private is a sibling" in log
+    assert "void" in log
+
+
+@posix_only
+def test_no_answers_warning_for_a_flat_data_dir(tmp_path):
+    root = _data_root(tmp_path, "c1")
+    main(["run", "--agent-cmd", 'printf "a\\n1\\n" > "$SUBMISSION_PATH"',
+          "--data-root", str(root), "--competition", "c1",
+          "--time-cap", "10", "--out", str(tmp_path / "runs")])
+    log = (tmp_path / "runs" / "c1__seed0" / "logs" / "harness.log").read_text()
+    assert "prepared/private" not in log
