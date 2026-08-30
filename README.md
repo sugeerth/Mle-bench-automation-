@@ -28,7 +28,27 @@ mlea triage runs/nightly -v --emit-runset nightly.json --split-id low
 # 4. did anything really change? could it even have been detected?
 mlea compare baseline.json nightly.json --fail-on-regression
 mlea power --design lite-regression
+
+# 5. look at it
+mlea report runs/nightly -o report.html
 ```
+
+### `mlea report` — eval dots
+
+A self-contained HTML page, no build step and no CDN. The headline view is a grid with
+**one dot per run**, competitions down and seeds across, answering at a glance the thing a
+table of percentages hides: *is this score made of ML results, or of plumbing failures?*
+
+Colour carries the three tiers this repo has argued for throughout — gradeable result,
+agent bug, our fault — as **categorical identity, not status**, because they are kinds of
+thing rather than good/bad states.
+
+The palette was validated rather than eyeballed, and the first attempt failed: green vs.
+orange measured **CVD ΔE 5.6 (protan)** and green vs. red **4.1 (deutan)**, so the chart's
+single most important distinction would have been invisible to a red-green colourblind
+reader. The shipped blue/red/neutral clears every gate in both light and dark. Each dot
+also carries a distinct *shape* (filled circle / diamond / hollow ring) and a text label in
+its tooltip, so colour is never the only channel.
 
 ### `mlea run` — the eval harness
 
@@ -143,7 +163,8 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] SOTA baseline + $0 bootstrap path documented
 - [x] `mlea` comparison + power tooling
 - [x] `mlea triage` failure classification
-- [x] `mlea run` eval harness (155 tests total)
+- [x] `mlea run` eval harness
+- [x] `mlea report` eval-dots visualization (185 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 run against real prepared data — the harness is written and tested, but has
       only ever run stub agents. Doable for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

@@ -23,6 +23,7 @@ from .harness import (
     Task,
     run_sweep,
 )
+from .report import write_report
 from .triage import triage_run_group
 
 COST_PER_RUN_USD = 150.0
@@ -142,6 +143,16 @@ def _cmd_triage(args: argparse.Namespace) -> int:
             "note: every run is recorded as no-medal. Fill in `any_medal` from "
             "`mlebench grade` before comparing."
         )
+    return 0
+
+
+def _cmd_report(args: argparse.Namespace) -> int:
+    root = Path(args.run_group)
+    if not root.is_dir():
+        print(f"error: {root} is not a directory", file=sys.stderr)
+        return 2
+    path = write_report(root, args.out, args.title)
+    print(f"wrote {path}")
     return 0
 
 
@@ -290,6 +301,12 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--split-id", default="unknown", help="split id for the run set")
     t.add_argument("--label", help="run set label (default: run group dir name)")
     t.set_defaults(func=_cmd_triage)
+
+    rp = sub.add_parser("report", help="render a run group as an HTML report")
+    rp.add_argument("run_group")
+    rp.add_argument("-o", "--out", default="report.html")
+    rp.add_argument("--title")
+    rp.set_defaults(func=_cmd_report)
 
     def add_design_args(sp: argparse.ArgumentParser) -> None:
         sp.add_argument("--design", help=f"preset: {', '.join(DESIGNS)}")
