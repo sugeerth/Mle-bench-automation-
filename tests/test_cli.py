@@ -118,7 +118,7 @@ def test_triage_emits_a_loadable_runset(tmp_path):
     g = tmp_path / "group"
     g.mkdir()
     _mkrun(g, "c1", {"exit_code": 0}, submission="a,b\n1,2\n")
-    _mkrun(g, "c2", {"exit_code": 1}, log="preempted")
+    _mkrun(g, "c2", {"exit_code": 1}, log="Spot ITN received. Interrupting.")
     out = tmp_path / "rs.json"
     assert main(["triage", str(g), "--emit-runset", str(out), "--split-id", "low"]) == 0
     rs = RunSet.from_json(out)

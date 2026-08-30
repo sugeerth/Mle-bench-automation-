@@ -325,19 +325,22 @@ should handle the common cases — they're cheaper and deterministic.
 
 These need answers before Phase 2, and I'd like input on them:
 
-0. **Baseline to beat.** Current SOTA is MLEvolve at 65.3% on the full set
+0. **Is a live-submission programme acceptable?** The withdrawn proposal's replacement means
+   entering the agent in ongoing public Kaggle competitions. That is a visible, outward-facing
+   act with its own rules and reputational surface, and it is not my call to make.
+1. **Baseline to beat.** Current SOTA is MLEvolve at 65.3% on the full set
    ([details](SOTA-AND-FREE-TIER.md#part-1--what-the-state-of-the-art-actually-is)). Is the
    target to match a published system, or to track a first-party agent over time? These imply
    different splits and very different budgets.
-1. **Where does this run?** Cloud provider and whether we have quota for 440 GB-RAM + A10-class
+2. **Where does this run?** Cloud provider and whether we have quota for 440 GB-RAM + A10-class
    instances at the parallelism Phase 2 assumes. This changes the Scheduler substantially
    (Kubernetes vs. a plain EC2/GCE pool vs. Slurm).
-2. **Which agents are in scope?** Upstream ships AIDE, MLAgentBench, OpenHands, and `dummy`.
+3. **Which agents are in scope?** Upstream ships AIDE, MLAgentBench, OpenHands, and `dummy`.
    Are we evaluating a first-party agent as the primary target, with the others as baselines?
-3. **What is the actual iteration loop we're serving?** "A researcher tweaking prompts daily"
+4. **What is the actual iteration loop we're serving?** "A researcher tweaking prompts daily"
    and "a release gate run monthly" imply very different priorities — the former makes Phase 3
    urgent and Phase 5 nearly irrelevant.
-4. **Budget ceiling.** A number here would resolve most of §5's tension immediately.
+5. **Budget ceiling.** A number here would resolve most of §5's tension immediately.
 
 ---
 

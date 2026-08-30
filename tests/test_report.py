@@ -43,7 +43,7 @@ def group(tmp_path):
     mkrun(g, "c2", 0, meta={"exit_code": 1},
           agent_log="RuntimeError: CUDA out of memory")
     mkrun(g, "c2", 1, meta={"exit_code": 1},
-          harness_log="Spot Instance interruption notice")
+          harness_log="Spot ITN received. Instance will be interrupted")
     return g
 
 

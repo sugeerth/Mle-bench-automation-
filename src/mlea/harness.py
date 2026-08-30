@@ -217,6 +217,14 @@ class RunConfig:
     grace_seconds: float = SIGTERM_GRACE_SECONDS
     #: Overwrite a run directory that already holds a completed run.
     force: bool = False
+    #: Glob for the agent's own submission file, mirrored into the run's
+    #: ``submission/submission.csv``. Real agents write where they like --
+    #: AIDE lands at ``workspaces/0-run/working/submission.csv``, MLEvolve at
+    #: ``runs/<timestamp>_<id>/workspace/best_submission/submission.csv`` --
+    #: so without this every agent needs a polling loop bolted onto its command.
+    #: Relative patterns resolve against the run's code directory. The
+    #: most-recently-modified match wins.
+    submission_glob: str | None = None
     #: Extra environment for the agent process.
     env: dict[str, str] = field(default_factory=dict)
 
@@ -254,6 +262,34 @@ class RunResult:
         return self.run_dir / "submission" / "submission.csv"
 
 
+def mirror_submission(workspace: "Workspace", pattern: str) -> Path | None:
+    """Copy the agent's own submission into the run's canonical location.
+
+    Returns the source path copied from, or ``None`` if nothing matched yet.
+    Never raises: a run mid-write, or an agent that has not produced anything,
+    is an ordinary state rather than a harness fault.
+    """
+    root = workspace.code_dir
+    try:
+        base = Path(pattern)
+        matches = (
+            list(Path(base.anchor).glob(str(base.relative_to(base.anchor))))
+            if base.is_absolute()
+            else list(root.glob(pattern))
+        )
+        candidates = [m for m in matches if m.is_file() and m.stat().st_size > 0]
+        if not candidates:
+            return None
+        newest = max(candidates, key=lambda m: m.stat().st_mtime)
+        workspace.submission_dir.mkdir(parents=True, exist_ok=True)
+        if newest.resolve() == workspace.submission_path.resolve():
+            return newest
+        shutil.copy2(newest, workspace.submission_path)
+        return newest
+    except OSError:
+        return None
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -272,9 +308,16 @@ class _Checkpointer(threading.Thread):
     sparse curves; that is a finding about the agent, not a defect here.
     """
 
-    def __init__(self, workspace: Workspace, marks: Sequence[float], cap: float):
+    def __init__(
+        self,
+        workspace: Workspace,
+        marks: Sequence[float],
+        cap: float,
+        submission_glob: str | None = None,
+    ):
         super().__init__(daemon=True, name="mlea-checkpointer")
         self._ws = workspace
+        self._glob = submission_glob
         self._marks = sorted({m for m in marks if 0 < m < cap})
         # Not `_stop`: that name shadows threading.Thread._stop, which the
         # interpreter calls during join() teardown.
@@ -296,6 +339,8 @@ class _Checkpointer(threading.Thread):
             self._snapshot(mark)
 
     def _snapshot(self, mark: float) -> None:
+        if self._glob:
+            mirror_submission(self._ws, self._glob)
         src = self._ws.submission_path
         try:
             if not src.exists() or src.stat().st_size == 0:
@@ -390,7 +435,9 @@ def run_one(agent: Agent, task: Task, config: RunConfig) -> RunResult:
     env.update(config.env)
 
     command = list(agent.build_command(task, ws))
-    checkpointer = _Checkpointer(ws, config.checkpoint_marks, config.time_cap_seconds)
+    checkpointer = _Checkpointer(
+        ws, config.checkpoint_marks, config.time_cap_seconds, config.submission_glob
+    )
 
     start = time.monotonic()
     timed_out = False
@@ -455,6 +502,9 @@ def run_one(agent: Agent, task: Task, config: RunConfig) -> RunResult:
         wall = time.monotonic() - start
         log(f"[mlea] exit={exit_code} wall={wall:.1f}s timed_out={timed_out}")
 
+    if config.submission_glob:
+        # Final mirror: the agent's last write may land after the last mark.
+        mirror_submission(ws, config.submission_glob)
     has_submission = ws.submission_path.exists()
     checkpoints = tuple(checkpointer.checkpoints)
     _write_metadata(ws, task, config, exit_code, wall, timed_out,
@@ -574,6 +624,7 @@ __all__ = [
     "RunResult",
     "Task",
     "Workspace",
+    "mirror_submission",
     "run_one",
     "run_sweep",
     "write_submissions_jsonl",

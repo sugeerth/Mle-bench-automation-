@@ -85,41 +85,152 @@ def _sig(
     return Signature(re.compile(regex, re.IGNORECASE), signal, outcome, ambiguous, note)
 
 
-#: Ordered. The first match wins, so put the least ambiguous signatures first.
+#: Ordered; the first match wins, least ambiguous first.
+#:
+#: These patterns are derived from the literal strings the emitting components
+#: actually produce, read out of their source: kubernetes/kubernetes,
+#: containerd, moby, docker/cli, distribution, runc, the Linux kernel, and
+#: aws-node-termination-handler. An earlier version of this list was guesswork
+#: and matched almost nothing real.
 INFRA_SIGNATURES: tuple[Signature, ...] = (
-    _sig(r"spot instance.{0,40}(interrupt|terminat)", "spot-interruption", Outcome.INFRA),
-    _sig(r"\bpreempt(ed|ion)\b", "preemption", Outcome.INFRA),
-    _sig(r"errimagepull|imagepullbackoff|failed to pull image|manifest unknown",
-         "image-pull", Outcome.INFRA),
-    _sig(r"failed to mount|mount error|cannot mount|invalid mount", "mount", Outcome.INFRA),
-    _sig(r"docker daemon.{0,40}(not running|connection refused)", "docker-daemon",
-         Outcome.INFRA),
-    _sig(r"node .{0,30}(terminated|notready)", "node-lost", Outcome.INFRA),
     _sig(
-        r"no space left on device",
+        r"/latest/meta-data/spot/instance-action"
+        r'|"action"\s*:\s*"(?:terminate|stop|hibernate)"'
+        r"|EC2\s+Spot\s+Instance\s+Interruption\s+Warning"
+        r"|Spot\s+ITN\s+received"
+        r"|aws-node-termination-handler/spot-itn",
+        "spot-interruption",
+        Outcome.INFRA,
+    ),
+    _sig(
+        r"computeMetadata/v1/instance/preempted"
+        r"|\bcompute\.instances\.preempted\b",
+        "gcp-preemption",
+        Outcome.INFRA,
+    ),
+    _sig(
+        # kube-scheduler victim event, and the pod DisruptionTarget condition.
+        r"Preempted\s+by\s+(?:pod\s+)?\S+\s+on\s+node\s+\S+"
+        r"|preempting\s+to\s+accommodate\s+a\s+higher\s+priority"
+        r"|Pod\s+was\s+terminated\s+in\s+response\s+to\s+imminent\s+node\s+shutdown"
+        r"|\bPreemptionByScheduler\b|\bTerminationByKubelet\b",
+        "preemption",
+        Outcome.INFRA,
+    ),
+    _sig(
+        r"The\s+node\s+was\s+low\s+on\s+resource:"
+        r"|The\s+node\s+had\s+condition:"
+        r"|Cannot\s+evict\s+pod\s+as\s+it\s+would\s+violate",
+        "node-pressure-eviction",
+        Outcome.INFRA,
+        note=(
+            "kubelet node-pressure eviction. Note that kubectl drain and the "
+            "disruption controller use the Eviction API instead and emit no such "
+            "message at all, so absence of this is not absence of eviction."
+        ),
+    ),
+    _sig(
+        r"\bErrImagePull\b|\bImagePullBackOff\b|\bErrImageNeverPull\b"
+        r"|\bInvalidImageName\b|\bImageInspectError\b"
+        r"|Back-off\s+pulling\s+image|Failed\s+to\s+pull\s+image"
+        r"|failed\s+to\s+pull\s+and\s+unpack\s+image"
+        r"|failed\s+to\s+resolve\s+reference"
+        r"|\bmanifest\s+unknown\b|manifest\s+for\s+\S+\s+not\s+found"
+        r"|pull\s+access\s+denied"
+        r"|requested\s+access\s+to\s+the\s+resource\s+is\s+denied"
+        r"|unauthorized:\s*authentication\s+required",
+        "image-pull",
+        Outcome.INFRA,
+        note=(
+            "registries deliberately conflate 'no such repository' with 'no "
+            "credentials', so the cause is not recoverable from the log alone."
+        ),
+    ),
+    _sig(
+        r'invalid\s+mount\s+config\s+for\s+type\s+"bind"'
+        r"|bind\s+source\s+path\s+does\s+not\s+exist"
+        r"|error\s+while\s+creating\s+mount\s+source\s+path"
+        r"|invalid\s+mount\s+path"
+        r'|error\s+mounting\s+"[^"]*"\s+to\s+rootfs\s+at'
+        r"|\bFailedMount\b|unmounted\s+volumes=",
+        "mount",
+        Outcome.INFRA,
+        note=(
+            "only `--mount` fails loudly; `-v` silently creates a missing source "
+            "as an empty root-owned directory, so a wrong bind mount usually "
+            "produces no log line at all."
+        ),
+    ),
+    _sig(
+        r"Cannot\s+connect\s+to\s+the\s+Docker\s+daemon"
+        r"|docker\s+daemon.{0,40}(?:not\s+running|connection\s+refused)"
+        r"|Error\s+response\s+from\s+daemon:",
+        "docker-daemon",
+        Outcome.INFRA,
+    ),
+    _sig(
+        r"No\s+space\s+left\s+on\s+device|\[Errno\s+28\]|\bENOSPC\b"
+        r"|Disk\s+quota\s+exceeded|\bDiskPressure\b",
         "disk-full",
         Outcome.INFRA,
         ambiguous=True,
         note=(
-            "disk sizing is a harness responsibility, but an agent writing "
-            "unbounded checkpoints causes the same message. Resolve with the "
-            "container's disk-usage telemetry before retrying."
+            "ENOSPC covers inode exhaustion and a full tmpfs as well as full "
+            "blocks -- df can show free space while df -i shows 100%. Disk sizing "
+            "is ours, but an agent writing unbounded checkpoints produces the "
+            "identical message. Resolve with statvfs on the failing path "
+            "(f_bavail vs f_favail) plus the container's disk usage."
         ),
     ),
 )
 
 MEMORY_SIGNATURES: tuple[Signature, ...] = (
-    _sig(r"cuda out of memory|cudaerrormemoryallocation", "cuda-oom", Outcome.OOM,
-         note="GPU OOM: the agent chose the batch size or model. Agent-attributable."),
-    _sig(r"out of memory: killed process|oom-kill|oom_reaper|memorykilled", "host-oom",
-         Outcome.OOM,
-         note="host OOM at the configured memory limit. Agent-attributable unless "
-              "the node was oversubscribed; check node memory telemetry."),
+    _sig(
+        r"CUDA\s+out\s+of\s+memory"
+        r"|torch\.(?:cuda\.)?OutOfMemoryError"
+        r"|CUDA\s+error:\s*out\s+of\s+memory",
+        "cuda-oom",
+        Outcome.OOM,
+        note=(
+            "GPU OOM: the agent chose the batch size or model. Agent-attributable. "
+            "Note 'CUDA out of memory' (caching allocator) and 'CUDA error: out of "
+            "memory' (raw cudaMalloc) are different code paths."
+        ),
+    ),
+    _sig(
+        r"OOM\s+when\s+allocating\s+tensor"
+        r"|Allocator\s+\([^)]*\)\s+ran\s+out\s+of\s+memory\s+trying\s+to\s+allocate"
+        r"|\bResourceExhaustedError\b",
+        "tensorflow-oom",
+        Outcome.OOM,
+        ambiguous=True,
+        note=(
+            "TensorFlow raises ResourceExhaustedError for BOTH host and device "
+            "allocation failures, so this does not say which ran out. Resolve with "
+            "nvidia-smi memory.used against the cgroup memory.events oom_kill delta."
+        ),
+    ),
+    _sig(
+        # mm/oom_kill.c. "Memory cgroup out of memory" is the container variant.
+        r"Memory\s+cgroup\s+out\s+of\s+memory"
+        r"|Out\s+of\s+memory(?:\s*\([^)]*\))?:\s*Kill(?:ed)?\s+process\s+\d+"
+        r"|Killed\s+process\s+\d+\s+\([^)]*\)\s+total-vm:"
+        r"|\boom-kill:constraint=|invoked\s+oom-killer:|\bOOMKilled\b",
+        "host-oom",
+        Outcome.OOM,
+        note=(
+            "host or cgroup OOM at the configured memory limit. Agent-attributable "
+            "unless the node was oversubscribed; the kernel line's oom_memcg= field "
+            "names the cgroup that actually hit its limit."
+        ),
+    ),
 )
 
 #: Exit codes with a fixed meaning.
 EXIT_TIMEOUT = 124  # GNU coreutils timeout
 EXIT_SIGKILL = 137  # 128 + SIGKILL, used by both OOM killers and timeout enforcers
+EXIT_NOT_EXECUTABLE = 126  # command found but not invocable (EACCES / EISDIR)
+EXIT_NOT_FOUND = 127  # executable file not found in $PATH
 
 
 @dataclass
@@ -346,6 +457,7 @@ def classify(artifacts: RunArtifacts) -> TriageResult:
             artifacts.seed,
             Outcome.OOM,
             (Evidence(mem_sig.signal, mem_matched),),
+            ambiguous=mem_sig.ambiguous,
             notes=(mem_sig.note,) if mem_sig.note else (),
             isolation=artifacts.isolation,
         )

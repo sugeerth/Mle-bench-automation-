@@ -80,6 +80,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         isolation=args.isolation,
         checkpoint_marks=marks,
         force=args.force,
+        submission_glob=args.submission_glob,
     )
     if config.isolation == "none":
         print(
@@ -301,6 +302,12 @@ def build_parser() -> argparse.ArgumentParser:
     r.add_argument("--isolation", default="none", choices=["none", "docker"])
     r.add_argument("--checkpoint-marks", help="comma-separated seconds")
     r.add_argument("--out", required=True, help="run group output directory")
+    r.add_argument("--submission-glob",
+                   help="where the agent writes its own submission, relative to "
+                        "CODE_DIR (e.g. 'workspaces/0-run/working/submission.csv' for "
+                        "AIDE, 'runs/*/workspace/best_submission/submission.csv' for "
+                        "MLEvolve). Mirrored at every checkpoint and at exit, so the "
+                        "agent needs no polling loop of its own")
     r.add_argument("--force", action="store_true",
                    help="overwrite completed runs (discards recorded results)")
     r.set_defaults(func=_cmd_run)

@@ -1,8 +1,87 @@
 # Proposal: MLE-bench-Live — a rolling, contamination-controlled split
 
-**Status:** proposal. Supersedes [`PROPOSAL-anytime-eval.md`](PROPOSAL-anytime-eval.md) as the
-primary new direction.
+**Status:** ⚠️ **WITHDRAWN as specified.** A feasibility pass against primary sources found
+the design dominated by an approach someone has already run, resting on a premise that is
+factually false, and yielding roughly one tenth the supply it assumed. The replacement is
+[§ What to do instead](#what-to-do-instead) at the bottom. The body is kept because the
+problem it identifies is real and unsolved — only the proposed solution is wrong.
 **Depends on:** Phase 2 of [`PLAN.md`](PLAN.md).
+
+---
+
+## Why this was withdrawn
+
+Five findings, each independently sufficient.
+
+**1. The freshness premise is false.** The design filters on competition *close* date. But
+Kaggle leaks continuously *during* a competition through public notebooks — MLE-bench itself
+stores a `kernels.txt` per competition listing the top 50, **3,636 notebooks across 82
+competitions**. A competition that ran January to June had five months of public
+high-scoring baselines on the open web before it closed. Kaggle's rules additionally
+*require* winners to publish a solution write-up within 14 days of close.
+
+This is the precise point where the SWE-bench-Live precedent fails to transfer: a GitHub
+issue's fix commit lands at a single instant and genuinely does not exist before it. A
+Kaggle competition leaks across its whole run. Filtering on *launch* date fixes the logic
+and roughly halves an already-thin supply.
+
+**2. There is no correctness oracle — and this is the blocker.** Both precedents can decide
+*automatically* whether a generated task is well-formed. SWE-bench-Live: valid iff the gold
+patch flips FAIL_TO_PASS tests. MMBench-Live: the generator produces the answer alongside
+the question. That is what makes 50 tasks/month and $30/refresh possible.
+
+MLE-bench-Live has nothing equivalent. There is no ground truth for "did I re-split this
+competition correctly and faithfully reimplement its metric?" — and the failure is *silent*:
+a leaky split yields a valid-looking task on which agents score suspiciously well. Upstream
+carries **8,323 lines of hand-written per-competition `prepare.py`** and 45 distinct metric
+implementations, and its own Known Issues list catalogues ~8 competitions with preparation
+bugs found by users after release, five of them test-label leakage created by the re-split.
+That is the defect rate of an expert-built, hand-reviewed pipeline. The MMBench-Live cost
+model prices generation-with-known-answers; this is reverse-engineering someone else's
+evaluation, which is a different problem with a different cost curve.
+
+**3. The people who built the pipeline never refreshed it.** The MLE-bench paper proposes
+this exact idea as future work — "regularly update MLE-bench with new Kaggle competitions to
+stay ahead of contamination issues." **Zero competitions have been added since the initial
+commit on 2024-10-08**, 22 months. Only 3 of the repo's 59 commits touch
+`mlebench/competitions/` at all, two of them a typo fix and a path fix. That is not
+encouragement; it is a measurement of the cost.
+
+**4. The arithmetic does not close.** Enumerating real closed competitions rather than
+estimating: ~9–14 clearly eligible "real" competitions per year (excluding the synthetic
+monthly Playground Series), falling to ~5–8 after launch-date filtering and ~3–6 after
+preparability — call it **3–5 defensible matched pairs per year**. Against the 16-pair floor
+in [`POWER-FINDINGS.md`](POWER-FINDINGS.md), that is **3–5 years of accumulation**, not the
+6–12 months assumed. Padding with Playground and community competitions to reach 16 faster
+destroys both the "real competition" claim and the difficulty matching.
+
+The supply problem is also structural and worsening: roughly 35–40% of recent Featured
+competitions are hackathons, judged submissions, agent games or reasoning prizes with no
+supervised train/test structure at all. Kaggle in 2026 is not producing the product it
+produced in 2018.
+
+**5. Prior art, including a strictly better version.** **MLE-Live / CoMind** already exists —
+the name is taken — and it submits to *live, ongoing* competitions, beating 92.6% of human
+competitors on average. **MLE-Smith** already automates task ingestion from raw Kaggle
+datasets (606 verified tasks, r=0.982 against human-designed tasks). **MLE-Dojo** scaled
+coverage to 200+ tasks. **TML-bench** did contamination control by cutoff-date model
+selection — and after all that work its post-cutoff split is **4 competitions, two of them
+Playground Series and two community competitions**. That is the empirical existence proof of
+what this approach yields.
+
+### One more thing worth recording
+
+The medal-threshold approximation is worse than upstream admits, and it is inherited by any
+design built on it. `Grader.rank_score` takes a *raw score value* at a rank position on the
+original leaderboard and compares the agent's score — computed on a different split — against
+it, with no rank mapping or recalibration. Of the 82 preparation scripts, **69 use plain
+`sklearn.train_test_split`; zero use stratification; zero are group- or time-aware.** The
+Kaggle private test sets those thresholds came from very often *were* split by time, site, or
+patient, deliberately. An i.i.d. split is systematically easier, so the approximation is
+**biased upward**, not merely noisy. Both teams who built a Kaggle-derived benchmark fresh
+(TML-bench, MLE-Dojo) declined to inherit medal thresholds.
+
+---
 
 ---
 
@@ -192,19 +271,41 @@ is binary and load-bearing.
 
 ---
 
-## Recommendation
+## What to do instead
 
-Promote this to the flagship direction — Phase 5 in [`PLAN.md`](PLAN.md), replacing "scheduled
-full split75 sweeps" as the thing worth building toward. Keep anytime checkpointing as cheap
-Phase 4 triage instrumentation. Drop the obfuscation probe entirely; it was already run and
-temporal holdout supersedes it.
+<a name="what-to-do-instead"></a>
 
-**Cheapest first step, and it costs nothing:** re-run the paper's own obfuscation test with a
-current agent. Note the design constraint from [`POWER-FINDINGS.md` §6](POWER-FINDINGS.md): a
-paired test needs **at least 6 competitions** to be able to return a significant result at all,
-so the "3 competitions" an earlier draft suggested cannot work no matter how large the effect.
-Use 8–10 as a directional smoke test, and treat a non-significant result as uninformative
-rather than as evidence of no contamination.
+**Submit to live, ongoing competitions.** It dominates the withdrawn design on every axis
+that matters:
+
+| | Rolling re-split of closed competitions | Live submission |
+| --- | --- | --- |
+| Contamination | partial — leaks during the run | **zero** — the solution does not exist yet |
+| Medal thresholds | approximated across a mismatched split, biased upward | **real**, official private leaderboard |
+| Preparation cost | ~100 LOC bespoke prep + a bespoke grader, unverifiable | **none** |
+| Re-split error | inherited | **none** |
+| Shots per year | 3–5 prepared pairs | 10–20 competitions |
+| Repeatable | yes | **no** — one shot each |
+
+Repeatability is the one thing lost, which sets the division of labour: **live submission for
+the contamination measurement** (a binary, load-bearing question that needs answering once),
+and **MLE-bench proper for the regression signal** (where repeatability is the entire point).
+Pair each live result against the agent's medal rate on modality- and size-matched MLE-bench
+competitions and you get the pre/post design with no ingest pipeline at all.
+
+If a rolling split is still wanted later, take SWE-bench-Live's real lesson rather than its
+headline: **freeze the comparable split and roll a separate one**; filter on **launch** date,
+not close date; replace medal thresholds with a HumanRank-style relative position computed on
+the original leaderboard, as MLE-Dojo does; and budget a human reviewer per competition,
+because there is no oracle and pretending otherwise is how a fifth leaky test set ships.
+
+### The cheapest first step is unchanged and still costs nothing
+
+Re-run the paper's own obfuscation test with a current agent. The 2024 result (8.5% vs 8.4%)
+was measured at the floor, where it had no power; at 65% it would finally be informative. Note
+the constraint from [`POWER-FINDINGS.md` §7](POWER-FINDINGS.md): a paired test needs **at least
+6 competitions** to return a significant result at all, so use 8–10, and treat a
+non-significant result as uninformative rather than as evidence of no contamination.
 
 ---
 

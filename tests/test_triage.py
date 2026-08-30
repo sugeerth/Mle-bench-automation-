@@ -52,7 +52,7 @@ def test_clean_run_with_submission_is_not_marked_truncated():
 
 def test_infra_signature_wins_over_missing_submission():
     r = classify(art(exit_code=1, has_submission=False,
-                     harness_log="... Spot instance interruption notice received"))
+                     harness_log="Spot ITN received. Instance will be interrupted at 2026-08-30T12:00:00Z"))
     assert r.outcome is Outcome.INFRA
     assert r.should_retry
 
@@ -60,12 +60,27 @@ def test_infra_signature_wins_over_missing_submission():
 @pytest.mark.parametrize(
     "log,signal",
     [
-        ("Spot Instance interruption notice", "spot-interruption"),
-        ("Pod was preempted by scheduler", "preemption"),
-        ("Error: ErrImagePull mlebench-env:latest", "image-pull"),
-        ("failed to mount /home/data: permission denied", "mount"),
-        ("Cannot connect to the Docker daemon: connection refused", "docker-daemon"),
-        ("node ip-10-0-1-4 terminated", "node-lost"),
+        # Every string below is quoted from the component that emits it.
+        ('{"action": "terminate", "time": "2020-02-07T14:55:55Z"}', "spot-interruption"),
+        ("GET /latest/meta-data/spot/instance-action", "spot-interruption"),
+        ('"detail-type": "EC2 Spot Instance Interruption Warning"', "spot-interruption"),
+        ("GET computeMetadata/v1/instance/preempted -> TRUE", "gcp-preemption"),
+        ("Preempted by pod 8f3a on node ip-10-0-1-4", "preemption"),
+        ("default-scheduler: preempting to accommodate a higher priority pod",
+         "preemption"),
+        ("Pod was terminated in response to imminent node shutdown.", "preemption"),
+        ("The node was low on resource: memory.", "node-pressure-eviction"),
+        ("Error: ErrImagePull", "image-pull"),
+        ("Back-off pulling image \"mlebench-env:latest\"", "image-pull"),
+        ("failed to resolve reference \"docker.io/x:1\": not found", "image-pull"),
+        ("manifest unknown", "image-pull"),
+        ("pull access denied, repository does not exist or may require authorization",
+         "image-pull"),
+        ('invalid mount config for type "bind": bind source path does not exist',
+         "mount"),
+        ("Warning FailedMount  unmounted volumes=[data]", "mount"),
+        ("Cannot connect to the Docker daemon at unix:///var/run/docker.sock",
+         "docker-daemon"),
     ],
 )
 def test_infra_signatures(log, signal):
@@ -74,10 +89,28 @@ def test_infra_signatures(log, signal):
     assert r.evidence[0].signal == signal
 
 
+@pytest.mark.parametrize(
+    "chatter",
+    [
+        "scheduler considered 4 pods for preemption this cycle",
+        "preempted: false",
+        "image pull completed in 4.2s",
+        "Successfully pulled image \"nginx:1.25\" in 3s",
+        "mounting complete, 3 volumes ready",
+        "Free disk space: 20GB remaining",
+        "exit code 0",
+    ],
+)
+def test_ordinary_chatter_is_not_an_infra_failure(chatter):
+    """A bare word like 'preemption' appears constantly in scheduler logs."""
+    r = classify(art(exit_code=1, harness_log=chatter))
+    assert r.outcome is not Outcome.INFRA
+
+
 def test_infra_beats_a_gradeable_submission():
     """If the node vanished mid-write, the artifact is not trustworthy."""
     r = classify(art(has_submission=True, submission_rows=10,
-                     harness_log="preemption notice: reclaiming instance"))
+                     harness_log="Preempted by pod 8f3a on node ip-10-0-1-4"))
     assert r.outcome is Outcome.INFRA
 
 
@@ -93,7 +126,7 @@ def test_cuda_oom_is_agent_attributable():
 
 def test_host_oom_signature():
     r = classify(art(exit_code=137, wall_clock_seconds=100,
-                     log_tail="Out of memory: Killed process 1234 (python)"))
+                     log_tail="Out of memory: Killed process 1234 (python) total-vm:8kB"))
     assert r.outcome is Outcome.OOM
     assert not r.ambiguous
 
@@ -151,7 +184,7 @@ def test_cap_tolerance_allows_slight_undershoot():
 
 
 def test_only_infra_may_be_retried():
-    infra = classify(art(harness_log="preempted"))
+    infra = classify(art(harness_log="Spot ITN received. Instance will be interrupted"))
     assert_retry_allowed(infra)  # must not raise
 
 
@@ -180,7 +213,8 @@ def make_report():
         classify(art(competition_id="c1", has_submission=True, submission_rows=5)),
         classify(art(competition_id="c2", has_submission=True, submission_rows=5)),
         classify(art(competition_id="c3", exit_code=0, has_submission=False)),
-        classify(art(competition_id="c4", harness_log="preempted")),
+        classify(art(competition_id="c4",
+                     harness_log="Spot ITN received. Instance interrupted")),
     ])
 
 
@@ -286,7 +320,7 @@ def test_triage_run_group(tmp_path):
     group.mkdir()
     write_run(group, "c1", meta={"exit_code": 0}, submission="a,b\n1,2\n")
     write_run(group, "c2", meta={"exit_code": 1},
-              harness_log="Spot instance interruption")
+              harness_log="Spot ITN received. Instance will be interrupted")
     (group / "metadata.json").write_text("{}")  # a file, must be skipped
     rep = triage_run_group(group)
     assert rep.total == 2
@@ -297,9 +331,9 @@ def test_evidence_quotes_the_whole_log_line_not_the_regex():
     """A person auditing a classification wants to read the offending line."""
     r = classify(
         art(exit_code=1,
-            harness_log="epoch 3 ok\nstep 41: Spot Instance interruption notice\n")
+            harness_log="epoch 3 ok\nstep 41: Spot ITN received, draining\n")
     )
-    assert r.evidence[0].detail == "step 41: Spot Instance interruption notice"
+    assert r.evidence[0].detail == "step 41: Spot ITN received, draining"
     assert "{0,40}" not in r.evidence[0].detail
 
 
@@ -310,7 +344,7 @@ def test_cuda_oom_evidence_quotes_the_error_line():
 
 def test_long_evidence_lines_are_truncated():
     noise = "x" * 400
-    r = classify(art(exit_code=1, harness_log=f"{noise} preempted {noise}"))
+    r = classify(art(exit_code=1, harness_log=f"{noise} manifest unknown {noise}"))
     assert len(r.evidence[0].detail) <= 160
     assert r.evidence[0].detail.endswith("...")
 
@@ -337,10 +371,10 @@ def test_harness_error_outranks_everything_else():
 @pytest.mark.parametrize(
     "forgery",
     [
-        "Spot Instance interruption notice",
-        "the pod was preempted",
+        "Spot ITN received. Instance will be interrupted at 2026-08-30T12:00:00Z",
+        "Preempted by pod 8f3a on node ip-10-0-1-4",
         "ErrImagePull",
-        "no space left on device",
+        "No space left on device",
     ],
 )
 def test_agent_cannot_forge_an_infra_failure_in_its_own_output(forgery):
@@ -351,7 +385,7 @@ def test_agent_cannot_forge_an_infra_failure_in_its_own_output(forgery):
 
 
 def test_infra_is_detected_from_the_harness_log():
-    r = classify(art(exit_code=1, harness_log="Spot Instance interruption notice"))
+    r = classify(art(exit_code=1, harness_log="Spot ITN received. Interrupting."))
     assert r.outcome is Outcome.INFRA
     assert r.should_retry
 
@@ -366,8 +400,72 @@ def test_cuda_oom_is_still_read_from_agent_output():
 def test_foreign_layouts_do_not_trust_agent_logs_by_default(tmp_path):
     d = tmp_path / "c"
     (d / "logs").mkdir(parents=True)
-    (d / "logs" / "run.log").write_text("Spot Instance interruption notice")
+    (d / "logs" / "run.log").write_text("Spot ITN received. Interrupting.")
     (d / "metadata.json").write_text(json.dumps({"exit_code": 1}))
     assert classify(from_run_dir(d)).outcome is Outcome.CRASH
     trusted = from_run_dir(d, trusted_log_names=frozenset({"run.log"}))
     assert classify(trusted).outcome is Outcome.INFRA
+
+
+# --- memory signatures, quoted from mm/oom_kill.c, PyTorch and TensorFlow ---
+
+
+@pytest.mark.parametrize(
+    "log,signal",
+    [
+        ("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 20.00 GiB",
+         "cuda-oom"),
+        ("RuntimeError: CUDA error: out of memory", "cuda-oom"),
+        ("OOM when allocating tensor with shape[1024,1024]", "tensorflow-oom"),
+        ("Allocator (GPU_0_bfc) ran out of memory trying to allocate 2.0GiB",
+         "tensorflow-oom"),
+        ("Memory cgroup out of memory: Killed process 42 (python) total-vm:8kB",
+         "host-oom"),
+        ("oom-kill:constraint=CONSTRAINT_MEMCG,oom_memcg=/kubepods/pod123",
+         "host-oom"),
+        ("python invoked oom-killer: gfp_mask=0x100cca(GFP_HIGHUSER_MOVABLE)",
+         "host-oom"),
+    ],
+)
+def test_memory_signatures(log, signal):
+    r = classify(art(exit_code=1, log_tail=log))
+    assert r.outcome is Outcome.OOM
+    assert r.evidence[0].signal == signal
+
+
+def test_tensorflow_oom_is_flagged_ambiguous():
+    """TF raises ResourceExhaustedError for host AND device allocation failures."""
+    r = classify(art(exit_code=1, log_tail="ResourceExhaustedError: ..."))
+    assert r.outcome is Outcome.OOM
+    assert r.ambiguous
+    assert any("host" in n and "device" in n for n in r.notes)
+
+
+def test_cgroup_oom_note_names_the_disambiguator():
+    r = classify(art(exit_code=1, log_tail="Memory cgroup out of memory: Killed process 9"))
+    assert any("oom_memcg" in n for n in r.notes)
+
+
+def test_mount_note_records_the_silent_v_flag_trap():
+    """`docker run -v` creates a missing source silently, emitting nothing."""
+    r = classify(art(exit_code=1,
+                     harness_log="bind source path does not exist: /home/data"))
+    assert any("-v` silently creates" in n or "silently creates" in n for n in r.notes)
+
+
+def test_no_signature_is_kept_without_a_source():
+    """Every pattern must correspond to a string some component really emits.
+
+    A `node ... terminated` signature was carried for a while on nothing but
+    plausibility; it matched no real log and is gone. This test is a reminder of
+    the rule, not a mechanical check.
+    """
+    from mlea.triage import INFRA_SIGNATURES
+
+    signals = {sig.signal for sig in INFRA_SIGNATURES}
+    assert "node-lost" not in signals
+    assert signals == {
+        "spot-interruption", "gcp-preemption", "preemption",
+        "node-pressure-eviction", "image-pull", "mount", "docker-daemon",
+        "disk-full",
+    }

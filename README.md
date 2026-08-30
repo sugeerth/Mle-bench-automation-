@@ -137,10 +137,11 @@ Everything else here is **planning documents**.
 | Document | What it covers |
 | --- | --- |
 | [`docs/PLAN.md`](docs/PLAN.md) | The build plan: architecture, phases, cost model, risks, open questions |
-| [`docs/PROPOSAL-mle-bench-live.md`](docs/PROPOSAL-mle-bench-live.md) | **Flagship proposal:** a rolling, contamination-controlled split built from post-cutoff Kaggle competitions |
+| [`docs/PROPOSAL-mle-bench-live.md`](docs/PROPOSAL-mle-bench-live.md) | Withdrawn — a rolling post-cutoff split, and the five findings that killed it |
 | [`docs/PROPOSAL-anytime-eval.md`](docs/PROPOSAL-anytime-eval.md) | Demoted — anytime checkpointing, kept as cheap triage instrumentation |
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
+| [`docs/AGENTS.md`](docs/AGENTS.md) | Wiring a real agent in: verified commands, and the traps in each |
 
 ## Read this first
 
@@ -153,8 +154,13 @@ comparable to each other; see [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-
 agents scoring 8.5% — at the floor, where it had almost no power to detect inflation. Nobody has
 re-run it at 65%. In the neighbouring benchmark, frontier models score 76–81% on SWE-bench
 Verified but ~23% on post-cutoff SWE-bench-Live. Whether MLE-bench has the same problem is
-unknown, and it conditions every other number here. See
-[`docs/PROPOSAL-mle-bench-live.md`](docs/PROPOSAL-mle-bench-live.md).
+unknown, and it conditions every other number here.
+
+This repo's own answer to that question — a rolling post-cutoff split — has been
+[**withdrawn**](docs/PROPOSAL-mle-bench-live.md): Kaggle leaks during a competition rather than
+after it, so close-date filtering does not buy a clean task; there is no way to verify a
+re-split automatically; and the realistic yield is 3–5 usable pairs a year against a 16-pair
+floor. Submitting to live, ongoing competitions dominates it.
 
 MLE-bench is expensive. A full 75-competition sweep at the reference hardware spec
 (24 h, 36 vCPU, 440 GB RAM, 1×A10) across the recommended 3 seeds is **225 node-days** of
@@ -169,7 +175,8 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea triage` failure classification
 - [x] `mlea run` eval harness
 - [x] `mlea report` eval-dots visualization
-- [x] Power model grounded in real published run data (206 tests total)
+- [x] Power model grounded in real published run data
+- [x] Log signatures and agent contracts verified against primary sources (241 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 run against real prepared data — the harness is written and tested, but has
       only ever run stub agents. Doable for **$0**, see [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

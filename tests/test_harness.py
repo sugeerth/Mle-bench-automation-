@@ -397,3 +397,79 @@ def test_submission_paths_in_jsonl_are_csv(tmp_path, data_dir):
     ]
     assert all(r["submission_path"].endswith(".csv") for r in rows)
     assert all(set(r) == {"competition_id", "submission_path"} for r in rows)
+
+
+# --- mirroring an agent's own submission path ---
+
+
+def test_mirrors_the_agents_own_submission(tmp_path, data_dir):
+    """AIDE writes workspaces/0-run/working/submission.csv and nothing else."""
+    agent = CommandAgent(
+        "aide-like",
+        'mkdir -p workspaces/0-run/working && '
+        'printf "id,y\\n1,7\\n" > workspaces/0-run/working/submission.csv',
+    )
+    r = run_one(agent, task(data_dir),
+                cfg(tmp_path, submission_glob="workspaces/0-run/working/submission.csv"))
+    assert r.has_submission
+    assert "1,7" in r.submission_path.read_text()
+    assert classify(from_run_dir(r.run_dir)).outcome is Outcome.VALID
+
+
+def test_mirror_glob_matches_a_timestamped_directory(tmp_path, data_dir):
+    """MLEvolve writes runs/<timestamp>_<id>/workspace/best_submission/."""
+    agent = CommandAgent(
+        "mlevolve-like",
+        'd=runs/20260830_120000_c1/workspace/best_submission && mkdir -p "$d" && '
+        'printf "id,y\\n2,2\\n" > "$d/submission.csv"',
+    )
+    r = run_one(agent, task(data_dir),
+                cfg(tmp_path,
+                    submission_glob="runs/*/workspace/best_submission/submission.csv"))
+    assert "2,2" in r.submission_path.read_text()
+
+
+def test_mirror_picks_the_newest_match(tmp_path, data_dir):
+    agent = CommandAgent(
+        "multi",
+        'mkdir -p a b && printf "id,y\\n1,1\\n" > a/submission.csv && sleep 1 && '
+        'printf "id,y\\n9,9\\n" > b/submission.csv',
+    )
+    r = run_one(agent, task(data_dir), cfg(tmp_path, submission_glob="*/submission.csv"))
+    assert "9,9" in r.submission_path.read_text()
+
+
+def test_mirror_builds_a_curve_from_the_agents_path(tmp_path, data_dir):
+    agent = CommandAgent(
+        "improving",
+        'mkdir -p w && printf "id,y\\n1,1\\n" > w/submission.csv && sleep 3 && '
+        'printf "id,y\\n1,1\\n2,2\\n" > w/submission.csv && sleep 3',
+    )
+    r = run_one(agent, task(data_dir),
+                cfg(tmp_path, time_cap_seconds=20.0, checkpoint_marks=(1.0, 5.0),
+                    submission_glob="w/submission.csv"))
+    assert len(r.checkpoints) == 2
+    assert r.checkpoints[0].sha256 != r.checkpoints[1].sha256
+
+
+def test_missing_mirror_source_is_not_a_harness_error(tmp_path, data_dir):
+    """An agent that produced nothing is a result, not a fault."""
+    r = run_one(CommandAgent("silent", "true"), task(data_dir),
+                cfg(tmp_path, submission_glob="nowhere/submission.csv"))
+    assert r.harness_error is None
+    assert not r.has_submission
+    assert classify(from_run_dir(r.run_dir)).outcome is Outcome.NO_SUBMISSION
+
+
+def test_empty_mirror_source_is_ignored(tmp_path, data_dir):
+    r = run_one(CommandAgent("empty", "mkdir -p w && : > w/submission.csv"),
+                task(data_dir), cfg(tmp_path, submission_glob="w/submission.csv"))
+    assert not r.has_submission
+
+
+def test_mirror_is_opt_in(tmp_path, data_dir):
+    """Without the flag, only $SUBMISSION_PATH counts."""
+    r = run_one(CommandAgent("aide-like",
+                             'mkdir -p w && printf "a\\n1\\n" > w/submission.csv'),
+                task(data_dir), cfg(tmp_path))
+    assert not r.has_submission
