@@ -21,7 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
-MODELLING = ("constant", "linear", "tuned")
+MODELLING = ("constant", "linear", "tuned", "naive", "careful", "expert")
 FAILING = ("broken", "silent", "crash", "hungry")
 #: A *simulated* memoriser, for use as a positive control in a contamination
 #: probe. It is handed the answers to competitions it has "seen" and recognises
@@ -41,9 +41,80 @@ def _read_csv(path: Path) -> tuple[list[str], np.ndarray, np.ndarray | None]:
     ids = [r[0] for r in body]
     has_target = header[-1] == "target"
     end = -1 if has_target else len(header)
-    X = np.array([[float(v) for v in r[1:end]] for r in body], dtype=float)
+    # An empty cell is a missing value. Parsing it as NaN rather than crashing is
+    # itself a competence: a naive agent that lets NaN through emits NaN
+    # predictions and produces an ungradeable submission.
+    X = np.array(
+        [[float(v) if v != "" else np.nan for v in r[1:end]] for r in body],
+        dtype=float,
+    )
     y = np.array([float(r[-1]) for r in body]) if has_target else None
     return ids, X, y
+
+
+def feature_names(path: Path) -> list[str]:
+    header = path.read_text().split("\n", 1)[0].split(",")
+    return header[1:-1] if header[-1] == "target" else header[1:]
+
+
+def impute(X: np.ndarray, means: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Column-mean imputation. Test uses the *train* means, never its own."""
+    X = np.asarray(X, dtype=float).copy()
+    if means is None:
+        means = np.nan_to_num(np.nanmean(np.where(np.isnan(X), np.nan, X), axis=0))
+    idx = np.where(np.isnan(X))
+    X[idx] = np.take(means, idx[1])
+    return X, means
+
+
+def clip_to(
+    X: np.ndarray,
+    bounds: tuple[np.ndarray, np.ndarray] | None = None,
+    *,
+    z_threshold: float = 12.0,
+):
+    """Winsorise, but only the columns that actually have outliers.
+
+    Clipping unconditionally is a competence failure of its own. On clean data
+    it discards real signal, and under covariate shift it is actively harmful:
+    test values legitimately lie outside the train range, and clamping them to
+    it destroys exactly the information the shift moved. A column is winsorised
+    only when its own extreme z-score says something is wrong with it.
+    """
+    X = np.asarray(X, dtype=float)
+    if bounds is None:
+        # Median and MAD, not mean and standard deviation. An outlier inflates
+        # the standard deviation, which shrinks its own z-score and can hide it
+        # -- the masking effect. MAD is unmoved by a few extreme points, so the
+        # detector still fires on exactly the values it exists to catch.
+        med = np.median(X, axis=0)
+        mad = np.median(np.abs(X - med), axis=0) * 1.4826 + 1e-12
+        extreme = (np.abs(X - med) / mad).max(axis=0)
+        flagged = extreme > z_threshold
+        lo = np.where(flagged, np.percentile(X, 0.5, axis=0), -np.inf)
+        hi = np.where(flagged, np.percentile(X, 99.5, axis=0), np.inf)
+        bounds = (lo, hi)
+    return np.clip(X, bounds[0], bounds[1]), bounds
+
+
+def suspicious_features(X: np.ndarray, y: np.ndarray, threshold: float = 0.9) -> list[int]:
+    """Columns that predict the target far too well on their own.
+
+    The practitioner's leak heuristic: if one raw feature nearly reproduces the
+    target, it is far more likely to be derived from it than to be a genuine
+    signal. Crude, and that is the point -- validating a feature rather than
+    trusting it is a low bar that a naive agent still fails.
+    """
+    out = []
+    ys = (y - y.mean()) / (y.std() + 1e-12)
+    for j in range(X.shape[1]):
+        col = X[:, j]
+        if np.std(col) < 1e-12:
+            continue
+        r = float(np.mean(((col - col.mean()) / (col.std() + 1e-12)) * ys))
+        if abs(r) > threshold:
+            out.append(j)
+    return out
 
 
 def _design(X: np.ndarray, capacity: int) -> np.ndarray:
@@ -193,6 +264,52 @@ def main(argv: list[str] | None = None) -> int:
         beta = _ridge(_design(X_tr, 1), y_tr, 1.0)
         _write(sub_path, test_ids, _design(X_te, 1) @ beta)
         print("fit ridge on raw features", flush=True)
+        return 0
+
+    # --- the competence ladder -------------------------------------------
+    # naive < careful < expert, each adding one identifiable skill. The point of
+    # the ladder is that a benchmark of clean data cannot tell them apart.
+    if strategy in ("naive", "careful", "expert"):
+        names = feature_names(data_dir / "train.csv")
+        keep = list(range(X_tr.shape[1]))
+
+        if strategy == "expert":
+            leaks = suspicious_features(*impute(X_tr)[:1] + (y_tr,)) \
+                if np.isnan(X_tr).any() else suspicious_features(X_tr, y_tr)
+            if leaks:
+                print("dropping suspiciously predictive feature(s): "
+                      + ", ".join(names[j] for j in leaks), flush=True)
+                keep = [j for j in keep if j not in leaks]
+
+        A_tr, A_te = X_tr[:, keep], X_te[:, keep]
+
+        if strategy in ("careful", "expert"):
+            A_tr, means = impute(A_tr)
+            A_te, _ = impute(A_te, means)
+            A_tr, bounds = clip_to(A_tr)
+            A_te, _ = clip_to(A_te, bounds)
+            n_clipped = int(np.isfinite(bounds[0]).sum())
+            print(f"imputed missing values; winsorised {n_clipped} outlying "
+                  f"column(s)", flush=True)
+
+        rng = np.random.default_rng(0)
+        best, best_pred = -np.inf, None
+        capacities = (1,) if strategy == "naive" else (1, 2, 3)
+        alphas = (1.0,) if strategy == "naive" else (0.1, 1.0, 10.0, 100.0)
+        for capacity in capacities:
+            for alpha in alphas:
+                try:
+                    score = _holdout_score(A_tr, y_tr, capacity, alpha, rng)
+                except np.linalg.LinAlgError:
+                    continue
+                if score > best:
+                    beta = _ridge(_design(A_tr, capacity), y_tr, alpha)
+                    best, best_pred = score, _design(A_te, capacity) @ beta
+        if best_pred is None:
+            print("no model fit", file=sys.stderr, flush=True)
+            return 1
+        _write(sub_path, test_ids, best_pred)
+        print(f"{strategy}: best holdout {best:.5f}", flush=True)
         return 0
 
     # tuned: a real search, writing a new submission whenever it improves.

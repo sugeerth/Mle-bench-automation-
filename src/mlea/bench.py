@@ -46,6 +46,35 @@ TASKS = {
     "regression": "rmse",
 }
 
+#: Named data pathologies, each rewarding one identifiable ML competence.
+#:
+#: A benchmark whose competitions are all clean measures one thing -- can the
+#: agent fit a model -- and saturates as soon as agents can. These make the
+#: benchmark *diagnostic*: because a challenged competition can be generated
+#: alongside an otherwise identical clean control, the score difference isolates
+#: one skill rather than reporting an aggregate that hides which one is missing.
+CHALLENGES: dict[str, str] = {
+    "leakage": (
+        "A feature that all but gives away the target in train and is pure noise "
+        "in test. Rewards validating a feature rather than trusting it -- the "
+        "single most characteristic Kaggle skill, and one no clean benchmark "
+        "tests at all."
+    ),
+    "shift": (
+        "Test features drawn shifted and rescaled relative to train. Rewards "
+        "regularisation and distrust of extrapolation."
+    ),
+    "outliers": (
+        "A small fraction of extreme feature values. Rewards clipping or a robust "
+        "loss; least squares is dragged by them."
+    ),
+    "missing": (
+        "Empty cells in both train and test. Rewards imputation. An agent that "
+        "does not handle them emits NaN and produces an ungradeable submission, "
+        "so this one shows up as an agent bug rather than a low score."
+    ),
+}
+
 
 @dataclass(frozen=True)
 class CompetitionSpec:
@@ -59,6 +88,8 @@ class CompetitionSpec:
     difficulty: float = 0.5
     n_teams: int = 300
     seed: int = 0
+    #: Pathologies to inject. Empty is the clean control.
+    challenges: frozenset[str] = frozenset()
 
     def __post_init__(self) -> None:
         if self.task not in TASKS:
@@ -67,6 +98,24 @@ class CompetitionSpec:
             raise ValueError("difficulty must be in [0, 1]")
         if self.n_teams < 1:
             raise ValueError("n_teams must be >= 1")
+        unknown = set(self.challenges) - set(CHALLENGES)
+        if unknown:
+            raise ValueError(
+                f"unknown challenge(s) {sorted(unknown)}; "
+                f"available: {sorted(CHALLENGES)}"
+            )
+        object.__setattr__(self, "challenges", frozenset(self.challenges))
+
+    def control(self) -> "CompetitionSpec":
+        """The same competition with no pathologies -- the matched control.
+
+        Same seed and same latent function, so the two differ *only* by the
+        challenge. That is what lets a score difference be attributed to one
+        skill instead of to difficulty drift.
+        """
+        from dataclasses import replace
+
+        return replace(self, id=f"{self.id}__control", challenges=frozenset())
 
     @property
     def metric(self) -> str:
@@ -132,6 +181,18 @@ def _design(X: np.ndarray, capacity: int) -> np.ndarray:
         iu = np.triu_indices(X.shape[1], k=1)
         cols.append(X[:, iu[0]] * X[:, iu[1]])
     return np.hstack(cols)
+
+
+def _sanitise(X: np.ndarray) -> np.ndarray:
+    """Impute and clip -- the minimum competence the simulated field has."""
+    X = np.asarray(X, dtype=float).copy()
+    if np.isnan(X).any():
+        col_mean = np.nanmean(np.where(np.isnan(X), np.nan, X), axis=0)
+        col_mean = np.nan_to_num(col_mean)
+        idx = np.where(np.isnan(X))
+        X[idx] = np.take(col_mean, idx[1])
+    lo, hi = np.percentile(X, [0.5, 99.5], axis=0)
+    return np.clip(X, lo, hi)
 
 
 def _simulate_leaderboard(
@@ -237,24 +298,64 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
         target_hint = "Predictions are real-valued."
         task_line = "Predict the continuous target for each row."
 
-    X_train, X_test = X[: spec.n_train], X[spec.n_train :]
+    X_train, X_test = X[: spec.n_train].copy(), X[spec.n_train :].copy()
     y_train, y_test = y[: spec.n_train], y[spec.n_train :]
 
+    # --- pathologies -------------------------------------------------------
+    # Applied to the feature matrices only, after the target is fixed, so the
+    # underlying problem is unchanged and the control differs by exactly this.
+    extra_train: list[np.ndarray] = []
+    extra_test: list[np.ndarray] = []
+    extra_names: list[str] = []
+
+    if "shift" in spec.challenges:
+        # Covariate shift: the relationship holds, the input distribution moves.
+        X_test = X_test * rng.uniform(1.2, 1.6) + rng.normal(0, 1.0, spec.n_features)
+
+    if "outliers" in spec.challenges:
+        for mat in (X_train, X_test):
+            n_out = max(int(mat.shape[0] * 0.02), 1)
+            rows = rng.choice(mat.shape[0], size=n_out, replace=False)
+            cols = rng.integers(0, spec.n_features, size=n_out)
+            mat[rows, cols] *= rng.uniform(30, 80, size=n_out)
+
+    if "leakage" in spec.challenges:
+        # Nearly perfect in train, pure noise in test. A model that trusts it
+        # scores near chance; one that validates it drops it and is unharmed.
+        extra_names.append("meta_score")
+        extra_train.append(
+            (y_train - y_train.mean()) / (y_train.std() + 1e-9)
+            + rng.normal(0, 0.05, spec.n_train)
+        )
+        extra_test.append(rng.normal(0, 1.0, spec.n_test))
+
+    if "missing" in spec.challenges:
+        for mat in (X_train, X_test):
+            mask = rng.random(mat.shape) < 0.04
+            mat[mask] = np.nan
+
+    if extra_train:
+        X_train = np.hstack([X_train, np.column_stack(extra_train)])
+        X_test = np.hstack([X_test, np.column_stack(extra_test)])
+
     id_column, target_column = "id", "target"
-    feats = [f"f{i}" for i in range(spec.n_features)]
+    feats = [f"f{i}" for i in range(spec.n_features)] + extra_names
     train_ids = [f"train_{i}" for i in range(spec.n_train)]
     test_ids = [f"test_{i}" for i in range(spec.n_test)]
+
+    def cell(v: float) -> str:
+        return "" if np.isnan(v) else f"{v:.6f}"  # empty cell, as real data has
 
     _write_csv(
         public / "train.csv",
         [id_column, *feats, target_column],
-        ([i, *[f"{v:.6f}" for v in row], f"{t:.6f}"]
+        ([i, *[cell(v) for v in row], f"{t:.6f}"]
          for i, row, t in zip(train_ids, X_train, y_train)),
     )
     _write_csv(
         public / "test.csv",
         [id_column, *feats],
-        ([i, *[f"{v:.6f}" for v in row]] for i, row in zip(test_ids, X_test)),
+        ([i, *[cell(v) for v in row]] for i, row in zip(test_ids, X_test)),
     )
     baseline = 0.5 if spec.task == "binary" else float(np.mean(y_train))
     _write_csv(
@@ -278,8 +379,12 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
         json.dumps({i: float(v) for i, v in zip(test_ids, y_test)})
     )
 
+    # The simulated field sees the same pathologies an agent does, and handles
+    # them the way a mediocre-to-decent field would: impute, clip, keep going.
+    lb_train = _sanitise(X_train)
+    lb_test = _sanitise(X_test)
     leaderboard = _simulate_leaderboard(
-        X_train, y_train, X_test, y_test, spec.metric, spec.n_teams, rng
+        lb_train, y_train, lb_test, y_test, spec.metric, spec.n_teams, rng
     )
     thresholds = thresholds_from_leaderboard(
         leaderboard, get_metric(spec.metric).greater_is_better
@@ -300,6 +405,7 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
                 "target_column": target_column,
                 "difficulty": spec.difficulty,
                 "seed": spec.seed,
+                "challenges": sorted(spec.challenges),
                 "thresholds": {
                     "gold": thresholds.gold, "silver": thresholds.silver,
                     "bronze": thresholds.bronze, "median": thresholds.median,
@@ -492,6 +598,7 @@ def make_suite(root: str | Path, specs: tuple[CompetitionSpec, ...] = SUITE) -> 
 
 
 __all__ = [
+    "CHALLENGES",
     "CLONE_TRANSFORMS",
     "CompetitionSpec",
     "clone_competition",

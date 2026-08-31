@@ -25,6 +25,7 @@ from .harness import (
     RunConfig,
     Task,
     resolve_competition_data_dir,
+    run_one,
     run_sweep,
 )
 from .bench import SUITE, CompetitionSpec, make_suite
@@ -140,6 +141,97 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     note = Path(args.note).read_text() if args.note else ""
     path = write_dashboard(root, args.out, args.title, note)
     print(f"wrote {path}")
+    return 0
+
+
+def _cmd_skills(args: argparse.Namespace) -> int:
+    """Profile which ML competences each agent has."""
+    from .bench import CHALLENGES, CompetitionSpec, make_competition
+    from .skills import SkillCell, SkillProfile
+
+    out = Path(args.out)
+    data = out / "data"
+    challenges = args.challenge or sorted(CHALLENGES)
+    agents = args.agent or ["naive", "careful", "expert"]
+
+    specs: dict[str, tuple[CompetitionSpec, CompetitionSpec]] = {}
+    for ch in challenges:
+        base = CompetitionSpec(
+            f"skill-{ch}", args.task, n_train=args.n_train, n_test=args.n_test,
+            difficulty=args.difficulty, n_teams=args.n_teams, seed=args.seed,
+            challenges=frozenset({ch}),
+        )
+        make_competition(base, data)
+        make_competition(base.control(), data)
+        specs[ch] = (base, base.control())
+    print(f"1. generated {len(challenges)} challenge(s), each with a matched control")
+
+    def run_and_score(agent: str, comp_id: str) -> tuple[float | None, str | None]:
+        comp = data / comp_id
+        task = Task(comp_id, resolve_competition_data_dir(data, comp_id), seed=0)
+        cfg = RunConfig(output_root=out / "runs" / agent, force=True,
+                        time_cap_seconds=args.time_cap, checkpoint_marks=())
+        cmd = CommandAgent(
+            agent, f"{sys.executable} -m mlea.baseline --strategy {agent}")
+        res = run_one(cmd, task, cfg)
+        rep = grade_submission(res.submission_path, comp)
+        if not rep.valid_submission:
+            return None, rep.error or "no submission"
+        lb = json.loads((comp / "leaderboard.json").read_text())
+        spec = json.loads((comp / "competition.json").read_text())
+        gib = get_metric(spec["metric"]).greater_is_better
+        return leaderboard_percentile(rep.score, lb, gib), None
+
+    profile = SkillProfile()
+    for agent in agents:
+        for ch in challenges:
+            base, control = specs[ch]
+            ctrl_pct, ctrl_err = run_and_score(agent, control.id)
+            chal_pct, chal_err = run_and_score(agent, base.id)
+            profile.cells.append(
+                SkillCell(agent, ch, ctrl_pct, chal_pct, chal_err or None)
+            )
+        worst = profile.hardest_for(agent)
+        print(f"2. {agent:9} robustness {profile.robustness(agent):+7.1%}  "
+              f"weakest: {worst}")
+
+    (out / "skills.json").write_text(json.dumps(profile.to_dict(), indent=2))
+
+    print("\n3. cost of each pathology, in leaderboard percentile points")
+    header = "   " + f"{'agent':10}" + "".join(f"{c:>13}" for c in challenges)
+    print(header)
+    for agent in agents:
+        row = f"   {agent:10}"
+        for ch in challenges:
+            cell = profile.cell(agent, ch)
+            if cell is None:
+                row += f"{'—':>13}"
+            elif cell.broke:
+                row += f"{'BROKE':>13}"
+            elif cell.delta is None:
+                row += f"{'—':>13}"
+            else:
+                row += f"{cell.delta:>+12.0%} "
+        print(row)
+
+    print()
+    if profile.no_agent_dominates():
+        best = {
+            ch: max(
+                (c for c in profile.cells
+                 if c.challenge == ch and not c.broke and c.delta is not None),
+                key=lambda c: c.delta, default=None)
+            for ch in challenges
+        }
+        wins = ", ".join(
+            f"{ch}: {c.agent}" for ch, c in best.items() if c is not None)
+        print(f"   NO AGENT DOMINATES — {wins}")
+        print("   Different challenges reward different competences, so a single")
+        print("   headline score cannot say what an agent is missing. That is the")
+        print("   whole argument for profiling rather than ranking.")
+    else:
+        print("   One agent leads on every challenge; a single score would suffice "
+              "for this field.")
     return 0
 
 
@@ -775,6 +867,20 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--note", help="text file whose contents are shown verbatim as "
                                    "the statistical comparison")
     db.set_defaults(func=_cmd_dashboard)
+
+    sk = sub.add_parser("skills", help="profile which ML competences an agent has")
+    sk.add_argument("--out", default="skills")
+    sk.add_argument("--challenge", action="append",
+                    help="repeatable; defaults to all")
+    sk.add_argument("--agent", action="append", help="repeatable")
+    sk.add_argument("--task", default="binary", choices=("binary", "regression"))
+    sk.add_argument("--n-train", type=int, default=1500)
+    sk.add_argument("--n-test", type=int, default=600)
+    sk.add_argument("--difficulty", type=float, default=0.4)
+    sk.add_argument("--n-teams", type=int, default=200)
+    sk.add_argument("--seed", type=int, default=3)
+    sk.add_argument("--time-cap", type=float, default=300.0)
+    sk.set_defaults(func=_cmd_skills)
 
     rp = sub.add_parser("report", help="render a run group as an HTML report")
     rp.add_argument("run_group")

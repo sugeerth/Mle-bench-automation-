@@ -396,6 +396,9 @@ _CSS = """
   --grid:#e1e0d9; --rule:#c3c2b7; --border:rgba(11,11,11,0.10);
   --tier-signal:#2a78d6; --tier-agent:#e34948; --tier-excluded:#898781;
   --track:#eceff3; --dim:#b9c0cb;
+  --div-zero:#f0efec;
+  --div-pos-1:#cde2fb; --div-pos-2:#86b6ef; --div-pos-3:#2a78d6;
+  --div-neg-1:#fbdcda; --div-neg-2:#f0a19c; --div-neg-3:#d03b3b;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -405,6 +408,9 @@ _CSS = """
     --grid:#2c2c2a; --rule:#383835; --border:rgba(255,255,255,0.10);
     --tier-signal:#3987e5; --tier-agent:#e34948; --tier-excluded:#898781;
     --track:#24272c; --dim:#4a5058;
+    --div-zero:#383835;
+    --div-pos-1:#184f95; --div-pos-2:#256abf; --div-pos-3:#5598e7;
+    --div-neg-1:#5a2422; --div-neg-2:#96322f; --div-neg-3:#e06a66;
   }
 }
 :root[data-theme="dark"]{
@@ -414,6 +420,9 @@ _CSS = """
   --grid:#2c2c2a; --rule:#383835; --border:rgba(255,255,255,0.10);
   --tier-signal:#3987e5; --tier-agent:#e34948; --tier-excluded:#898781;
   --track:#24272c; --dim:#4a5058;
+  --div-zero:#383835;
+  --div-pos-1:#184f95; --div-pos-2:#256abf; --div-pos-3:#5598e7;
+  --div-neg-1:#5a2422; --div-neg-2:#96322f; --div-neg-3:#e06a66;
 }
 pre.cmp{font:12.5px/1.6 ui-monospace,SFMono-Regular,monospace;
   background:var(--plane);border:1px solid var(--border);border-radius:8px;

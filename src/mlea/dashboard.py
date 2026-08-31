@@ -30,6 +30,8 @@ from pathlib import Path
 from .grade import leaderboard_percentile
 from .metrics import get_metric
 from .report import TIER_OF, _e, _fmt_duration, _mark, _CSS, _JS
+from .skills import SkillProfile
+from .skills import load as load_skills
 from .triage import Outcome, TriageReport, classify, from_run_dir
 
 
@@ -75,6 +77,7 @@ class Session:
     #: competition_id -> competition.json
     specs: dict[str, dict] = field(default_factory=dict)
     leaderboards: dict[str, list[float]] = field(default_factory=dict)
+    skills: SkillProfile | None = None
 
     @property
     def competitions(self) -> list[str]:
@@ -157,6 +160,13 @@ def load_session(root: str | Path, title: str | None = None) -> Session:
             except (OSError, json.JSONDecodeError, KeyError):
                 grades = {}
         session.agents.append(AgentRuns(agent_dir.name, TriageReport(results), grades))
+
+    skills_path = root / "skills.json"
+    if skills_path.exists():
+        try:
+            session.skills = load_skills(skills_path)
+        except (OSError, json.JSONDecodeError, TypeError):
+            session.skills = None
 
     data_root = root / "data"
     if data_root.is_dir():
@@ -326,6 +336,81 @@ def _headroom(session: Session) -> str:
     return "".join(parts)
 
 
+def _div_fill(delta: float | None, broke: bool) -> tuple[str, str]:
+    """Diverging scale: two hues that read as opposite, neutral at zero.
+
+    Returns ``(fill, text-class)``. The strongest step is a *light* colour on the
+    dark surface and a saturated one on the light surface, so theme ink drops
+    below the 4.5:1 text floor on it in dark mode. Those cells therefore carry a
+    fixed dark ink in both themes; every other step uses theme ink, which is
+    already correct against its own surface.
+    """
+    if broke:
+        return "var(--div-neg-3)", "cellv strong"
+    if delta is None:
+        return "var(--track)", "cellv"
+    mag = abs(delta)
+    if mag < 0.02:
+        return "var(--div-zero)", "cellv"
+    step = 1 if mag < 0.05 else 2 if mag < 0.20 else 3
+    arm = "pos" if delta > 0 else "neg"
+    return f"var(--div-{arm}-{step})", ("cellv strong" if step == 3 else "cellv")
+
+
+def _skill_grid(profile: SkillProfile) -> str:
+    """Agents down, pathologies across, cell = cost versus the matched control.
+
+    Every cell carries its number as well as its colour: the value is the point,
+    and colour alone would make the grid unreadable to a CVD reader and useless
+    in print.
+    """
+    agents, challenges = profile.agents, profile.challenges
+    if not agents or not challenges:
+        return ""
+    cw, ch_, labelw, top = 96, 34, 96, 30
+    width = labelw + len(challenges) * cw + 10
+    height = top + len(agents) * ch_ + 8
+    parts = [
+        f'<svg viewBox="0 0 {width} {height}" width="{width}" height="{height}" '
+        f'role="img" aria-label="Cost of each pathology per agent">'
+    ]
+    for ci, ch in enumerate(challenges):
+        parts.append(
+            f'<text x="{labelw + ci * cw + cw / 2}" y="{top - 11}" class="tick mid" '
+            f'text-anchor="middle">{_e(ch)}</text>'
+        )
+    for ai, agent in enumerate(agents):
+        y = top + ai * ch_
+        parts.append(
+            f'<text x="{labelw - 12}" y="{y + 21}" class="tick" '
+            f'text-anchor="end">{_e(agent)}</text>'
+        )
+        for ci, chal in enumerate(challenges):
+            cell = profile.cell(agent, chal)
+            x = labelw + ci * cw
+            delta = None if cell is None else cell.delta
+            broke = bool(cell and cell.broke)
+            label = ("BROKE" if broke else "—" if delta is None
+                     else f"{delta:+.0%}")
+            tip = f"{agent} · {chal}\n"
+            if broke:
+                tip += f"no gradeable submission: {cell.failure}"
+            elif cell is not None and delta is not None:
+                tip += (f"control {cell.control_percentile:.0%} → "
+                        f"challenged {cell.challenged_percentile:.0%}\n"
+                        f"cost {delta:+.0%} percentile points")
+            fill, text_class = _div_fill(delta, broke)
+            parts.append(
+                f'<g class="dot" tabindex="0" data-tip="{_e(tip)}">'
+                f'<rect x="{x + 2}" y="{y + 2}" width="{cw - 4}" height="{ch_ - 4}" '
+                f'rx="5" fill="{fill}"/>'
+                f'<text x="{x + cw / 2}" y="{y + 21}" class="{text_class}" '
+                f'text-anchor="middle">{_e(label)}</text></g>'
+            )
+    parts.append("</svg>")
+    return "".join(parts)
+
+
 def _table(session: Session) -> str:
     head = ("<tr><th>agent</th><th class='num'>medal rate</th>"
             "<th class='num'>mean pctile</th>"
@@ -360,6 +445,11 @@ EXTRA_CSS = """
   margin-top:12px}
 .keyline i{display:inline-block;width:2px;height:13px;background:var(--ink);
   opacity:.55}
+text.cellv{fill:var(--ink);font-size:11.5px;font-variant-numeric:tabular-nums;
+  font-weight:500}
+/* The strongest diverging step is light on dark and saturated on light, so it
+   needs a fixed dark ink to clear 4.5:1 in both themes. */
+text.cellv.strong{fill:#101318}
 """
 
 
@@ -393,6 +483,37 @@ def render_dashboard(session: Session, comparison_note: str = "") -> str:
             f'one gets the same number. Rank on percentile when the field is '
             f'strong.</div>'
         )
+
+    skills_section = ""
+    if session.skills is not None and session.skills.cells:
+        p = session.skills
+        rows = "".join(
+            f"<tr><td>{_e(a)}</td><td class='num'>{p.robustness(a):+.0%}</td>"
+            f"<td>{_e(p.hardest_for(a) or '—')}</td></tr>"
+            for a in sorted(p.agents, key=lambda a: -p.robustness(a))
+        )
+        verdict = (
+            "<p class='note'><strong>No agent dominates.</strong> Different "
+            "pathologies reward different competences, so a single headline score "
+            "cannot say what an agent is missing — which is the argument for "
+            "profiling rather than ranking.</p>"
+            if p.no_agent_dominates() else
+            "<p class='note'>One agent leads on every pathology, so for this field "
+            "a single score would have sufficed.</p>"
+        )
+        skills_section = f"""<section>
+<h2>Which competence is missing?</h2>
+<p class="note">Each pathology is generated alongside an otherwise identical clean
+control — same seed, same latent function — so the difference isolates one skill
+rather than reporting an aggregate that hides which one is absent. Blue is better
+than the control, red is worse, and <strong>BROKE</strong> means no gradeable
+submission at all.</p>
+<div class="scroll">{_skill_grid(p)}</div>
+{verdict}
+<div class="scroll" style="margin-top:16px"><table>
+<tr><th>agent</th><th class="num">robustness</th><th>weakest skill</th></tr>
+{rows}</table></div>
+</section>"""
 
     headroom = _headroom(session)
     headroom_section = (
@@ -437,6 +558,8 @@ mark for its outcome and score.</p>
 <div class="legend">{legend}</div>
 {f'<div class="warn"><strong>{worst_mech.mechanical_rate:.0%} of {_e(worst_mech.label)} runs failed mechanically rather than on ML.</strong> For that agent the score is measuring plumbing, not capability.</div>' if worst_mech.mechanical_rate > 0.15 else ''}
 </section>
+
+{skills_section}
 
 {headroom_section}
 

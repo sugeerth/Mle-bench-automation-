@@ -96,7 +96,9 @@ def test_percentile_breaks_a_medal_rate_tie(tmp_path):
 
 def test_no_saturation_warning_when_a_single_agent_leads(session_dir):
     assert not load_session(session_dir).medal_rate_is_saturated
-    assert "saturated" not in render_dashboard(load_session(session_dir))
+    # Match the warning itself, not the word: "saturated" also appears in a CSS
+    # comment about colour steps.
+    assert "Medal rate has saturated" not in render_dashboard(load_session(session_dir))
 
 
 def test_missing_grades_degrade_to_zero_not_a_crash(tmp_path):

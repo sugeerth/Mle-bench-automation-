@@ -105,6 +105,26 @@ Three findings, all reproducible in about a minute:
 
 See [`docs/CONTAMINATION-PROBE.md`](docs/CONTAMINATION-PROBE.md).
 
+### `mlea skills` — which competence is missing?
+
+MLE-bench reports one number, and at 65% it is close to saturating. Neither medal rate nor
+percentile can say *what* an agent is missing — the only thing useful to someone improving it.
+
+Each pathology is generated alongside an **otherwise identical clean control** (same seed, same
+latent function, oracle score provably unchanged), so the difference isolates one skill:
+
+|  | leakage | missing | outliers | shift | robustness |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `naive` | −47% | **BROKE** | −86% | +1% | −58% |
+| `careful` | −61% | −1% | −18% | −26% | −26% |
+| `expert` | **+17%** | −1% | −18% | −26% | −11% |
+
+**No agent dominates** — four pathologies, three different winners. `careful` is *worse* than
+`naive` on leakage, because its capacity search finds the leak more effectively and latches on
+harder. Nobody handles shift. On clean data all three look interchangeable.
+
+See [`docs/SKILL-PROFILE.md`](docs/SKILL-PROFILE.md).
+
 ### `mlea report` — eval dots
 
 A self-contained HTML page, no build step and no CDN. The headline view is a grid with
@@ -215,6 +235,7 @@ Everything else here is **planning documents**.
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
 | [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
 | [`docs/CONTAMINATION-PROBE.md`](docs/CONTAMINATION-PROBE.md) | A contamination probe with a positive control — and three findings about how to measure contamination at all |
+| [`docs/SKILL-PROFILE.md`](docs/SKILL-PROFILE.md) | A benchmark that says *which* ML competence an agent is missing, not just how well it scored |
 | [`docs/AGENTS.md`](docs/AGENTS.md) | Wiring a real agent in: verified commands, and the traps in each |
 
 ## Read this first
@@ -253,7 +274,8 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] Log signatures and agent contracts verified against primary sources
 - [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
 - [x] `mlea probe` — contamination probe with a working positive control
-- [x] `mlea dashboard` — comparative UI across every agent (336 tests total)
+- [x] `mlea dashboard` — comparative UI across every agent
+- [x] `mlea skills` — skill profiling against matched clean controls (357 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 against real **Kaggle** data — the pipeline now runs end to end on generated
       competitions, but has still never touched a real competition. Doable for **$0**, see
