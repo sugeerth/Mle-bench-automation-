@@ -91,6 +91,25 @@ def thresholds_from_leaderboard(
     )
 
 
+def leaderboard_percentile(
+    score: float, leaderboard: Sequence[float], greater_is_better: bool
+) -> float:
+    """Fraction of the leaderboard this score beats, in [0, 1].
+
+    A raw score is not comparable across competitions: an AUC difference and an
+    RMSE difference are different units pointing in opposite directions, and
+    averaging them is meaningless. A percentile is comparable, direction-free
+    and bounded -- which is why both teams who built a Kaggle-derived benchmark
+    after MLE-bench (TML-bench, MLE-Dojo) replaced medal thresholds with a
+    relative-position score rather than inherit raw-value transfer.
+    """
+    arr = np.asarray(leaderboard, dtype=float)
+    if arr.size == 0:
+        raise ValueError("empty leaderboard")
+    beaten = (arr < score) if greater_is_better else (arr > score)
+    return float(beaten.mean())
+
+
 @dataclass
 class GradingReport:
     """Upstream-compatible outcome for one submission."""

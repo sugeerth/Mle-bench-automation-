@@ -23,7 +23,15 @@ import numpy as np
 
 MODELLING = ("constant", "linear", "tuned")
 FAILING = ("broken", "silent", "crash", "hungry")
-STRATEGIES = MODELLING + FAILING
+#: A *simulated* memoriser, for use as a positive control in a contamination
+#: probe. It is handed the answers to competitions it has "seen" and recognises
+#: them by fingerprint. It exists to prove a probe can detect memorisation when
+#: memorisation is present -- a property no published contamination test has
+#: ever demonstrated about itself.
+PROBING = ("memorizer",)
+STRATEGIES = MODELLING + FAILING + PROBING
+
+MEMORY_KEYS = ("names", "values")
 
 
 def _read_csv(path: Path) -> tuple[list[str], np.ndarray, np.ndarray | None]:
@@ -39,13 +47,21 @@ def _read_csv(path: Path) -> tuple[list[str], np.ndarray, np.ndarray | None]:
 
 
 def _design(X: np.ndarray, capacity: int) -> np.ndarray:
+    """Permutation-equivariant feature expansion.
+
+    A real agent does not know which columns the signal lives in, so nothing
+    here may reference a column by index. Anything that did would score
+    differently on a column-permuted clone of the same problem, producing a
+    difference that looks exactly like memorisation and is not.
+    """
     cols = [np.ones((X.shape[0], 1)), X]
-    if capacity >= 2 and X.shape[1] > 1:
-        cols.append((X[:, 0] * X[:, 1])[:, None])
-    if capacity >= 3 and X.shape[1] > 2:
-        cols.append(np.tanh(2.0 * X[:, 2])[:, None])
-    if capacity >= 4:
+    if capacity >= 2:
         cols.append(X**2)
+    if capacity >= 3 and X.shape[1] > 1:
+        cols.append(np.tanh(2.0 * X))
+    if capacity >= 4 and X.shape[1] > 1:
+        iu = np.triu_indices(X.shape[1], k=1)
+        cols.append(X[:, iu[0]] * X[:, iu[1]])
     return np.hstack(cols)
 
 
@@ -81,9 +97,38 @@ def _holdout_score(X: np.ndarray, y: np.ndarray, capacity: int, alpha: float,
     return float(-np.mean((y[va] - pred) ** 2))  # higher is better
 
 
+def row_fingerprints(header: list[str], X: np.ndarray, key: str) -> list[str]:
+    """Identify individual rows the way a memorising model plausibly would.
+
+    Keyed per row, not per dataset: a model that has seen a dataset recalls the
+    mapping from *rows* to labels, and can apply it however the rows are
+    presented. Keying on the row id instead would make any reissue of ids look
+    like a successful defence, which it is not.
+
+    ``values`` hashes the sorted, rounded values of the row itself. Shuffling
+    rows or permuting columns leaves that untouched -- only changing the numbers
+    defeats it. ``names`` hashes the column names, so it is defeated by any
+    rename; that is roughly the strength of a description-level obfuscation, and
+    the comparison between the two is the point of the probe.
+    """
+    import hashlib
+
+    X = np.asarray(X, dtype=float)
+    if key == "names":
+        h = hashlib.sha256("|".join(header).encode()).hexdigest()[:24]
+        return [f"{h}:{i}" for i in range(X.shape[0])]
+    return [
+        hashlib.sha256(np.sort(np.round(row, 4)).tobytes()).hexdigest()[:24]
+        for row in X
+    ]
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="mlea-baseline")
     p.add_argument("--strategy", required=True, choices=STRATEGIES)
+    p.add_argument("--memory-dir", default=os.environ.get("MEMORY_DIR"),
+                   help="answers for competitions the memoriser has 'seen'")
+    p.add_argument("--memory-key", default="values", choices=MEMORY_KEYS)
     p.add_argument("--think-seconds", type=float, default=0.0,
                    help="pause between search steps, so checkpoint marks land "
                         "between improvements and a real curve is visible")
@@ -108,6 +153,26 @@ def main(argv: list[str] | None = None) -> int:
     train_ids, X_tr, y_tr = _read_csv(data_dir / "train.csv")
     test_ids, X_te, _ = _read_csv(data_dir / "test.csv")
     assert y_tr is not None
+
+    if strategy == "memorizer":
+        import json
+
+        header = (data_dir / "test.csv").read_text().split("\n", 1)[0].split(",")[1:]
+        memory: dict[str, float] = {}
+        mem_dir = Path(args.memory_dir) if args.memory_dir else None
+        if mem_dir and mem_dir.is_dir():
+            for f in mem_dir.glob("*.json"):
+                memory.update(json.loads(f.read_text()))
+        fps = row_fingerprints(header, X_te, args.memory_key)
+        hits = [memory.get(f) for f in fps]
+        hit_rate = sum(h is not None for h in hits) / max(len(hits), 1)
+        if hit_rate >= 0.9:
+            _write(sub_path, test_ids,
+                   np.array([h if h is not None else 0.0 for h in hits]))
+            print(f"RECALLED {hit_rate:.0%} of rows from memory", flush=True)
+            return 0
+        print(f"recalled only {hit_rate:.0%} of rows; solving honestly", flush=True)
+        strategy = "tuned"  # fall through to real work, as a real model would
 
     if strategy == "broken":
         # A plausible real bug: right rows, wrong column name.

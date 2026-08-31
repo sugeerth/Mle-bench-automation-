@@ -79,12 +79,20 @@ def _latent(X: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     Purely linear targets make ridge an oracle and collapse the leaderboard, so
     there has to be structure a linear model cannot fully capture -- otherwise
     every team ties and medal thresholds become meaningless.
+
+    The interacting and nonlinear columns are chosen **at random per
+    competition**. Fixing them at columns 0, 1 and 2 made column position carry
+    universal information about where the signal lives, which any model written
+    against this generator could exploit -- an advantage no real competition
+    offers, and one that shows up as a spurious effect the moment columns are
+    permuted.
     """
     n_features = X.shape[1]
     w = rng.normal(0, 1, size=n_features)
     linear = X @ w
-    interaction = 1.5 * X[:, 0] * X[:, 1]
-    nonlinear = 1.2 * np.tanh(2.0 * X[:, 2]) if n_features > 2 else 0.0
+    i, j, k = rng.choice(n_features, size=3, replace=n_features < 3)
+    interaction = 1.5 * X[:, i] * X[:, j]
+    nonlinear = 1.2 * np.tanh(2.0 * X[:, k])
     return linear + interaction + nonlinear
 
 
@@ -94,15 +102,35 @@ def _ridge(X: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
     return np.linalg.solve(X.T @ X + alpha * np.eye(n), X.T @ y)
 
 
+def _design_invariant(X: np.ndarray) -> np.ndarray:
+    """A feature map that does not depend on column *position*.
+
+    :func:`_design` hand-picks ``X[:,0]*X[:,1]`` and ``tanh(X[:,2])``, so a
+    column permutation moves the signal out from under it. Measuring a clone's
+    difficulty with such a model reports a difference that is an artefact of the
+    measuring model, not of the problem -- which is exactly the confound a
+    contamination probe must not have. Linear and elementwise-square terms are
+    permutation-equivariant, so a ridge fit on them is invariant to column order.
+    """
+    return np.hstack([np.ones((X.shape[0], 1)), X, X**2])  # see _design
+
+
 def _design(X: np.ndarray, capacity: int) -> np.ndarray:
-    """Feature map at a given modelling capacity -- a team's skill level."""
+    """Feature map at a given modelling capacity -- a team's skill level.
+
+    Every level is **permutation-equivariant**: the set of columns produced does
+    not depend on the input column order. A design that hand-picks indices makes
+    a model's score depend on where the generator happened to put the signal,
+    which is both unrealistic and fatal to a clone-based probe.
+    """
     cols = [np.ones((X.shape[0], 1)), X]
-    if capacity >= 2 and X.shape[1] > 1:
-        cols.append((X[:, 0] * X[:, 1])[:, None])
-    if capacity >= 3 and X.shape[1] > 2:
-        cols.append(np.tanh(2.0 * X[:, 2])[:, None])
-    if capacity >= 4:
+    if capacity >= 2:
         cols.append(X**2)
+    if capacity >= 3 and X.shape[1] > 1:
+        cols.append(np.tanh(2.0 * X))
+    if capacity >= 4 and X.shape[1] > 1:
+        iu = np.triu_indices(X.shape[1], k=1)
+        cols.append(X[:, iu[0]] * X[:, iu[1]])
     return np.hstack(cols)
 
 
@@ -287,6 +315,165 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
     return comp_dir
 
 
+# --- matched clones: the contamination probe the real benchmark cannot run ----
+
+
+CLONE_TRANSFORMS = ("relabel", "rescale")
+
+
+def clone_competition(
+    source: str | Path,
+    clone_id: str,
+    root: str | Path,
+    *,
+    transform: str = "rescale",
+    seed: int = 0,
+) -> Path:
+    """Create a surface-different competition with the same underlying problem.
+
+    This is the thing a rolling Kaggle split cannot give you. Matching two real
+    competitions on difficulty is guesswork, and a systematic difficulty
+    difference is indistinguishable from contamination -- the bias that made
+    :mod:`docs/PROPOSAL-mle-bench-live` unworkable. Here the clone *is* the same
+    problem, so the difficulty difference is zero (``relabel``) or measurable
+    and tiny (``rescale``).
+
+    ``relabel`` permutes and renames the columns, shuffles the rows and reissues
+    the ids. Values are untouched, so difficulty is **exactly** preserved. It
+    defeats recall keyed on names, ids or ordering, and does not defeat recall
+    keyed on the values themselves.
+
+    ``rescale`` additionally applies a positive per-column affine map. That
+    defeats value-keyed recall too, at the cost of perturbing the latent
+    nonlinearity, so the difficulty match becomes empirical rather than exact --
+    :func:`clone_difficulty_delta` measures it.
+    """
+    if transform not in CLONE_TRANSFORMS:
+        raise ValueError(f"transform must be one of {CLONE_TRANSFORMS}")
+    src = Path(source)
+    spec_json = json.loads((src / "competition.json").read_text())
+    rng = np.random.default_rng(seed)
+
+    def read(path: Path) -> tuple[list[str], list[list[str]]]:
+        with path.open(newline="") as fh:
+            rows = list(csv.reader(fh))
+        return rows[0], rows[1:]
+
+    train_head, train_rows = read(src / "prepared" / "public" / "train.csv")
+    test_head, test_rows = read(src / "prepared" / "public" / "test.csv")
+    answers = json.loads((src / "prepared" / "private" / "answers.json").read_text())
+
+    n_features = len(test_head) - 1
+    perm = rng.permutation(n_features)
+    # Opaque names, so nothing about the original survives in the header.
+    new_names = [f"v{rng.integers(1000, 9999)}_{i}" for i in range(n_features)]
+    if transform == "rescale":
+        scale = rng.uniform(0.5, 2.0, size=n_features)
+        shift = rng.normal(0, 0.5, size=n_features)
+    else:
+        scale, shift = np.ones(n_features), np.zeros(n_features)
+
+    def remap(row: list[str], has_target: bool) -> list[str]:
+        feats = np.array([float(v) for v in row[1 : 1 + n_features]])
+        moved = feats[perm] * scale[perm] + shift[perm]
+        out = [f"{v:.6f}" for v in moved]
+        return out + ([row[-1]] if has_target else [])
+
+    train_order = rng.permutation(len(train_rows))
+    test_order = rng.permutation(len(test_rows))
+    new_train_ids = [f"r{i}" for i in range(len(train_rows))]
+    new_test_ids = [f"q{i}" for i in range(len(test_rows))]
+
+    comp_dir = Path(root) / clone_id
+    public, private = comp_dir / "prepared" / "public", comp_dir / "prepared" / "private"
+    _write_csv(
+        public / "train.csv",
+        ["id", *new_names, "target"],
+        ([nid, *remap(train_rows[o], True)]
+         for nid, o in zip(new_train_ids, train_order)),
+    )
+    _write_csv(
+        public / "test.csv",
+        ["id", *new_names],
+        ([nid, *remap(test_rows[o], False)]
+         for nid, o in zip(new_test_ids, test_order)),
+    )
+    old_test_ids = [r[0] for r in test_rows]
+    new_answers = {
+        nid: answers[old_test_ids[o]] for nid, o in zip(new_test_ids, test_order)
+    }
+    baseline = 0.5 if spec_json["task"] == "binary" else float(
+        np.mean([float(r[-1]) for r in train_rows])
+    )
+    _write_csv(
+        public / "sample_submission.csv",
+        ["id", "target"],
+        ([i, f"{baseline:.6f}"] for i in new_test_ids),
+    )
+    (public / "description.md").write_text(
+        (src / "prepared" / "public" / "description.md")
+        .read_text()
+        .replace(spec_json["id"], clone_id)
+        .replace("`f0`..`f" + str(n_features - 1) + "`", "opaque feature columns")
+    )
+    private.mkdir(parents=True, exist_ok=True)
+    (private / "answers.json").write_text(json.dumps(new_answers))
+
+    clone_spec = dict(spec_json)
+    clone_spec.update(
+        {
+            "id": clone_id,
+            "cloned_from": spec_json["id"],
+            "clone_transform": transform,
+            "generated_by": "mlea.bench.clone_competition",
+        }
+    )
+    (comp_dir / "competition.json").write_text(json.dumps(clone_spec, indent=2))
+    (comp_dir / "leaderboard.json").write_text(
+        (src / "leaderboard.json").read_text()
+    )
+    return comp_dir
+
+
+def clone_difficulty_delta(original: str | Path, clone: str | Path) -> float:
+    """Measured difficulty gap between a competition and its clone.
+
+    Fits a **permutation-invariant** reference model on each and returns
+    ``clone - original`` in metric units, signed so that positive always means
+    *the clone is easier*. A probe's whole validity rests on this being ~0: any
+    real difficulty difference is indistinguishable from a memorisation effect.
+
+    Permutation invariance is not a detail. Measuring with a model that
+    hand-picks column indices reports a difference that is an artefact of the
+    measuring model rather than of the problem.
+    """
+    def fit_score(comp: Path) -> float:
+        spec = json.loads((comp / "competition.json").read_text())
+        metric = get_metric(spec["metric"])
+        pub = comp / "prepared" / "public"
+
+        def load(path: Path, has_target: bool):
+            with path.open(newline="") as fh:
+                rows = list(csv.reader(fh))
+            body = rows[1:]
+            end = -1 if has_target else len(rows[0])
+            X = np.array([[float(v) for v in r[1:end]] for r in body])
+            y = np.array([float(r[-1]) for r in body]) if has_target else None
+            return [r[0] for r in body], X, y
+
+        _, X_tr, y_tr = load(pub / "train.csv", True)
+        ids, X_te, _ = load(pub / "test.csv", False)
+        beta = _ridge(_design_invariant(X_tr), y_tr, 1.0)
+        pred = _design_invariant(X_te) @ beta
+        answers = json.loads((comp / "prepared/private/answers.json").read_text())
+        y_true = np.array([answers[i] for i in ids])
+        return metric(y_true, pred), metric.greater_is_better
+
+    a, gib = fit_score(Path(original))
+    b, _ = fit_score(Path(clone))
+    return (b - a) if gib else (a - b)
+
+
 #: A default suite spanning task type and difficulty, so a self-test exercises
 #: an easy competition, a hard one, and both metric directions.
 SUITE: tuple[CompetitionSpec, ...] = (
@@ -305,7 +492,10 @@ def make_suite(root: str | Path, specs: tuple[CompetitionSpec, ...] = SUITE) -> 
 
 
 __all__ = [
+    "CLONE_TRANSFORMS",
     "CompetitionSpec",
+    "clone_competition",
+    "clone_difficulty_delta",
     "SUITE",
     "TASKS",
     "make_competition",

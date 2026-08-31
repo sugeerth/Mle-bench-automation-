@@ -395,6 +395,7 @@ _CSS = """
   --ink:#0b0b0b; --ink-2:#52514e; --muted:#898781;
   --grid:#e1e0d9; --rule:#c3c2b7; --border:rgba(11,11,11,0.10);
   --tier-signal:#2a78d6; --tier-agent:#e34948; --tier-excluded:#898781;
+  --track:#eceff3; --dim:#b9c0cb;
 }
 @media (prefers-color-scheme: dark){
   :root:not([data-theme="light"]){
@@ -403,6 +404,7 @@ _CSS = """
     --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
     --grid:#2c2c2a; --rule:#383835; --border:rgba(255,255,255,0.10);
     --tier-signal:#3987e5; --tier-agent:#e34948; --tier-excluded:#898781;
+    --track:#24272c; --dim:#4a5058;
   }
 }
 :root[data-theme="dark"]{
@@ -411,7 +413,11 @@ _CSS = """
   --ink:#fff; --ink-2:#c3c2b7; --muted:#898781;
   --grid:#2c2c2a; --rule:#383835; --border:rgba(255,255,255,0.10);
   --tier-signal:#3987e5; --tier-agent:#e34948; --tier-excluded:#898781;
+  --track:#24272c; --dim:#4a5058;
 }
+pre.cmp{font:12.5px/1.6 ui-monospace,SFMono-Regular,monospace;
+  background:var(--plane);border:1px solid var(--border);border-radius:8px;
+  padding:14px 16px;overflow-x:auto;color:var(--ink-2);margin:0}
 *{box-sizing:border-box}
 body{margin:0;background:var(--plane);color:var(--ink);
   font:14px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}

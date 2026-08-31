@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+
+import numpy as np
 from dataclasses import replace
 from pathlib import Path
 
@@ -26,7 +28,9 @@ from .harness import (
     run_sweep,
 )
 from .bench import SUITE, CompetitionSpec, make_suite
-from .grade import grade_submission
+from .grade import grade_submission, leaderboard_percentile
+from .metrics import get_metric
+from .dashboard import write_dashboard
 from .report import write_report
 from .triage import triage_run_group
 
@@ -126,6 +130,199 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_dashboard(args: argparse.Namespace) -> int:
+    root = Path(args.session)
+    if not (root / "runs").is_dir():
+        print(f"error: {root / 'runs'} does not exist. A session directory holds "
+              f"runs/<agent>/ and optionally grades/<agent>/ and data/.",
+              file=sys.stderr)
+        return 2
+    note = Path(args.note).read_text() if args.note else ""
+    path = write_dashboard(root, args.out, args.title, note)
+    print(f"wrote {path}")
+    return 0
+
+
+def _cmd_probe(args: argparse.Namespace) -> int:
+    """Run the contamination probe, with both controls."""
+    from .bench import (
+        CLONE_TRANSFORMS,
+        SUITE,
+        clone_competition,
+        clone_difficulty_delta,
+        make_suite,
+    )
+    from .probe import ProbeCell, ProbeResult
+
+    out = Path(args.out)
+    data = out / "data"
+    specs = SUITE[: args.competitions]
+    make_suite(data, specs)
+
+    print(f"1. generated {len(specs)} competition(s) and their clones")
+    deltas: dict[str, list[float]] = {t: [] for t in CLONE_TRANSFORMS}
+    for spec in specs:
+        for t in CLONE_TRANSFORMS:
+            c = clone_competition(data / spec.id, f"{spec.id}__{t}", data,
+                                  transform=t, seed=hash(spec.id) % 10_000)
+            deltas[t].append(clone_difficulty_delta(data / spec.id, c))
+    for t in CLONE_TRANSFORMS:
+        worst = max(abs(d) for d in deltas[t])
+        print(f"   {t:8} difficulty delta: worst |{worst:.6f}| across "
+              f"{len(deltas[t])} clone(s)")
+        if worst > args.max_delta:
+            print(f"   the {t} clones are not the same problem; probe invalid",
+                  file=sys.stderr)
+            return 1
+
+    # Give the memoriser the originals' answers -- and only the originals'.
+    # Absolute: the agent runs with its cwd set to its own code directory, so a
+    # relative memory path silently resolves to nothing and every lookup misses.
+    memory = (out / "memory").resolve()
+    memory.mkdir(parents=True, exist_ok=True)
+    from .baseline import row_fingerprints
+    import csv as _csv
+
+    for spec in specs:
+        pub = data / spec.id / "prepared" / "public"
+        with (pub / "test.csv").open(newline="") as fh:
+            rows = list(_csv.reader(fh))
+        header, body = rows[0][1:], rows[1:]
+        X = np.array([[float(v) for v in r[1:]] for r in body])
+        answers = json.loads(
+            (data / spec.id / "prepared/private/answers.json").read_text())
+        fps = row_fingerprints(header, X, args.memory_key)
+        (memory / f"{spec.id}.json").write_text(
+            json.dumps({fp: answers[r[0]] for fp, r in zip(fps, body)}))
+    print(f"2. memorised {len(specs)} original(s), keyed on {args.memory_key}")
+
+    cells: list[ProbeCell] = []
+    agents = {"memorizer": "memorizer", "honest": "tuned"}
+    targets = [(s.id, False, None) for s in specs] + [
+        (f"{s.id}__{t}", True, t) for s in specs for t in CLONE_TRANSFORMS
+    ]
+    for label, strategy in agents.items():
+        tasks = [
+            Task(cid, resolve_competition_data_dir(data, cid), seed=0)
+            for cid, _, _ in targets
+        ]
+        cfg = RunConfig(output_root=out / "runs" / label,
+                        time_cap_seconds=args.time_cap, checkpoint_marks=(), force=True)
+        agent = CommandAgent(
+            label,
+            f"{sys.executable} -m mlea.baseline --strategy {strategy} "
+            f"--memory-dir {memory} --memory-key {args.memory_key}",
+        )
+        results = run_sweep(agent, tasks, cfg)
+        for (cid, is_clone, transform), res in zip(targets, results):
+            rep = grade_submission(res.submission_path, data / cid)
+            log = (res.run_dir / "logs" / "agent.log")
+            recalled = "RECALLED" in (log.read_text() if log.exists() else "")
+            pct = None
+            if rep.valid_submission:
+                lb = json.loads((data / cid / "leaderboard.json").read_text())
+                spec = json.loads((data / cid / "competition.json").read_text())
+                pct = leaderboard_percentile(
+                    rep.score, lb, get_metric(spec["metric"]).greater_is_better)
+            cells.append(ProbeCell(label, cid, is_clone, transform, rep.score,
+                                   pct, rep.any_medal, rep.valid_submission,
+                                   recalled))
+        print(f"3. ran {label} on {len(targets)} competition(s)")
+
+    result = ProbeResult(cells)
+    (out / "probe.json").write_text(json.dumps(result.to_dict(), indent=2))
+
+    print("\n4. gap = original minus clone, in leaderboard percentile points "
+          "(positive means it did better on what it had seen)")
+    print(f"   {'agent':10} {'seen the original':>18}")
+    for label in agents:
+        print(f"   {label:10} {result.recall_rate(label, None):17.0%}")
+    print(f"\n   {'agent':10} {'transform':10} {'still recalled':>15} "
+          f"{'pctile gap':>12} {'medal gap':>11}")
+    verdicts = []
+    for label in agents:
+        for t in CLONE_TRANSFORMS:
+            gap = result.gap(label, t)
+            mgap = result.medal_gap(label, t)
+            rr = result.recall_rate(label, t)
+            print(f"   {label:10} {t:10} {rr:14.0%} "
+                  f"{'  n/a' if gap is None else f'{gap:+11.1%}'} "
+                  f"{'  n/a' if mgap is None else f'{mgap:+10.0%}'}")
+            verdicts.append((label, t, gap, rr))
+
+    print("\n5. what the controls say")
+    problems = []
+
+    def check(ok: bool, msg: str) -> None:
+        print(f"   {'PASS' if ok else 'FAIL'}  {msg}")
+        if not ok:
+            problems.append(msg)
+
+    honest_gaps = [abs(g) for l, t, g, _ in verdicts if l == "honest" and g is not None]
+    check(
+        bool(honest_gaps) and max(honest_gaps) < 0.10,
+        f"negative control: an honest solver shows no gap "
+        f"(worst |{max(honest_gaps):.1%}|)" if honest_gaps else
+        "negative control: an honest solver shows no gap",
+    )
+    mem_rescale = result.gap("memorizer", "rescale")
+    honest_rescale = result.gap("honest", "rescale")
+    separated = (
+        mem_rescale is not None
+        and honest_rescale is not None
+        and mem_rescale - honest_rescale > 0.05
+    )
+    check(
+        separated,
+        f"positive control: rescale separates the memoriser from an honest "
+        f"solver ({mem_rescale:+.1%} vs {honest_rescale:+.1%})"
+        if mem_rescale is not None and honest_rescale is not None
+        else "positive control: rescale separates the memoriser",
+    )
+    mem_medal = result.medal_gap("memorizer", "rescale")
+    if mem_medal is not None and mem_rescale is not None:
+        if abs(mem_medal) < 1e-9:
+            print(
+                f"\n   FINDING: the memoriser is worth {mem_rescale:+.1%} in "
+                f"percentile but {mem_medal:+.0%} in medal rate.\n"
+                f"   Any-medal is binary and saturates: an agent good enough to "
+                f"medal without recall\n   and one that recalls perfectly are the "
+                f"same number. So MLE-bench's own headline\n   metric cannot see a "
+                f"contamination effect that does not flip a medal -- and the "
+                f"stronger\n   agents get, the more effects fall into that blind "
+                f"spot. A probe must score on\n   percentile or raw score, never on "
+                f"medal rate."
+            )
+        else:
+            print(
+                f"\n   note: percentile gap {mem_rescale:+.1%} vs medal gap "
+                f"{mem_medal:+.0%}. Both compress near the top of a\n   crowded "
+                f"leaderboard, so a contamination effect is hardest to see exactly "
+                f"where\n   agents are strongest."
+            )
+    check(
+        result.recall_rate("memorizer", None) > 0.9,
+        f"the memoriser does recall what it was shown "
+        f"({result.recall_rate('memorizer', None):.0%} of originals)",
+    )
+    relabel_recall = result.recall_rate("memorizer", "relabel")
+    check(
+        relabel_recall > 0.5,
+        f"renaming and reordering alone does NOT defeat value-keyed recall "
+        f"({relabel_recall:.0%} of relabel clones still recalled)",
+    )
+    check(
+        result.recall_rate("memorizer", "rescale") < 0.1,
+        f"altering the values does defeat it "
+        f"({result.recall_rate('memorizer', 'rescale'):.0%} of rescale clones recalled)",
+    )
+    if problems:
+        print(f"\nPROBE FAILED: {len(problems)} control(s)", file=sys.stderr)
+        return 1
+    print("\nPROBE VALID — it detects memorisation when memorisation is present")
+    return 0
+
+
 def _cmd_selftest(args: argparse.Namespace) -> int:
     """Exercise the whole pipeline against real, gradeable competitions.
 
@@ -137,7 +334,6 @@ def _cmd_selftest(args: argparse.Namespace) -> int:
     from .bench import SUITE, make_suite
     from .compare import compare
     from .records import RunSet
-    from .report import write_report
     from .triage import Outcome, triage_run_group
 
     out = Path(args.out)
@@ -249,10 +445,16 @@ def _cmd_selftest(args: argparse.Namespace) -> int:
     cmp = compare(results["constant"]["runset"], results["tuned"]["runset"])
     print(f"\n4. {cmp.summary()}")
 
+    note_path = out / "comparison.txt"
+    note_path.write_text(cmp.summary())
     report_path = write_report(
         out / "runs" / "tuned", out / "report.html", title="mlea selftest · tuned"
     )
-    print(f"\n5. wrote {report_path}")
+    dash_path = write_dashboard(
+        out, out / "dashboard.html",
+        title=f"mlea selftest · {len(strategies)} agents", comparison_note=cmp.summary(),
+    )
+    print(f"\n5. wrote {report_path}\n   wrote {dash_path}")
 
     if problems:
         print(f"\nSELFTEST FAILED: {len(problems)} check(s)", file=sys.stderr)
@@ -553,6 +755,26 @@ def build_parser() -> argparse.ArgumentParser:
     st.add_argument("--seeds", type=int, default=1)
     st.add_argument("--time-cap", type=float, default=120.0)
     st.set_defaults(func=_cmd_selftest)
+
+    pr = sub.add_parser(
+        "probe", help="contamination probe with positive and negative controls")
+    pr.add_argument("--out", default="probe", help="working directory")
+    pr.add_argument("--competitions", type=int, default=4)
+    pr.add_argument("--memory-key", default="values", choices=("names", "values"))
+    pr.add_argument("--max-delta", type=float, default=0.01,
+                    help="largest clone difficulty difference the probe tolerates")
+    pr.add_argument("--time-cap", type=float, default=180.0)
+    pr.set_defaults(func=_cmd_probe)
+
+    db = sub.add_parser(
+        "dashboard", help="comparative dashboard across every agent in a session")
+    db.add_argument("session", help="directory holding runs/<agent>/ (and optionally "
+                                    "grades/<agent>/ and data/)")
+    db.add_argument("-o", "--out", default="dashboard.html")
+    db.add_argument("--title")
+    db.add_argument("--note", help="text file whose contents are shown verbatim as "
+                                   "the statistical comparison")
+    db.set_defaults(func=_cmd_dashboard)
 
     rp = sub.add_parser("report", help="render a run group as an HTML report")
     rp.add_argument("run_group")

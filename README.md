@@ -82,9 +82,28 @@ mlea triage runs/nightly -v --emit-runset nightly.json --split-id low
 mlea compare baseline.json nightly.json --fail-on-regression
 mlea power --design lite-regression
 
-# 5. look at it
-mlea report runs/nightly -o report.html
+# 5. look at it — every agent at once
+mlea dashboard runs/nightly -o dashboard.html
 ```
+
+### `mlea probe` — a contamination probe that is known to work
+
+No published contamination test for MLE-bench has ever shown it fires when contamination is
+present. Generated competitions settle that, because a clone can be the *same problem*
+exactly — `relabel` preserves difficulty to 0.000000, which no pair of real competitions can.
+
+Three findings, all reproducible in about a minute:
+
+- **Renaming does not defeat recall.** A memoriser recalled **100%** of clones with different
+  column names, column order, row order and ids. Only altering the values defeated it. The
+  2024 obfuscation test rewrote *descriptions* — it was of exactly that strength.
+- **Medal rate cannot see contamination.** The memoriser's advantage was worth **+8.9
+  percentile points and +0% medal rate.** Any-medal saturates: an agent good enough to medal
+  without recall and one that recalls perfectly are the same number.
+- **Percentile compresses at the top**, so contamination is hardest to detect exactly where
+  agents are strongest — which is now.
+
+See [`docs/CONTAMINATION-PROBE.md`](docs/CONTAMINATION-PROBE.md).
 
 ### `mlea report` — eval dots
 
@@ -195,6 +214,7 @@ Everything else here is **planning documents**.
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
 | [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
+| [`docs/CONTAMINATION-PROBE.md`](docs/CONTAMINATION-PROBE.md) | A contamination probe with a positive control — and three findings about how to measure contamination at all |
 | [`docs/AGENTS.md`](docs/AGENTS.md) | Wiring a real agent in: verified commands, and the traps in each |
 
 ## Read this first
@@ -231,7 +251,9 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea report` eval-dots visualization
 - [x] Power model grounded in real published run data
 - [x] Log signatures and agent contracts verified against primary sources
-- [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real (298 tests total)
+- [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
+- [x] `mlea probe` — contamination probe with a working positive control
+- [x] `mlea dashboard` — comparative UI across every agent (336 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 against real **Kaggle** data — the pipeline now runs end to end on generated
       competitions, but has still never touched a real competition. Doable for **$0**, see

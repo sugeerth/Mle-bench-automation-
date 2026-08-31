@@ -259,18 +259,35 @@ def test_reference_agents_run_and_grade(comp, tmp_path, strategy, expect_valid):
     assert grade_submission(sub, comp).valid_submission is expect_valid
 
 
+def _score(comp, tmp_path, strategy):
+    sub = tmp_path / f"{strategy}-{comp.name}.csv"
+    env = dict(os.environ, DATA_DIR=str(comp / "prepared" / "public"),
+               SUBMISSION_PATH=str(sub))
+    subprocess.run([sys.executable, "-m", "mlea.baseline", "--strategy", strategy],
+                   env=env, capture_output=True, text=True, timeout=300, check=True)
+    return grade_submission(sub, comp).score
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX only")
-def test_tuned_beats_linear_beats_constant(comp, tmp_path):
-    """Real model quality, not a fixed answer."""
-    scores = {}
-    for strategy in ("constant", "linear", "tuned"):
-        sub = tmp_path / f"{strategy}.csv"
-        env = dict(os.environ, DATA_DIR=str(comp / "prepared" / "public"),
-                   SUBMISSION_PATH=str(sub))
-        subprocess.run([sys.executable, "-m", "mlea.baseline", "--strategy", strategy],
-                       env=env, capture_output=True, text=True, timeout=180, check=True)
-        scores[strategy] = grade_submission(sub, comp).score
-    assert scores["tuned"] > scores["linear"] > scores["constant"]
+def test_modelling_beats_a_constant_baseline(comp, tmp_path):
+    assert _score(comp, tmp_path, "linear") > _score(comp, tmp_path, "constant")
+    assert _score(comp, tmp_path, "tuned") > _score(comp, tmp_path, "constant")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX only")
+def test_extra_capacity_pays_once_there_is_enough_data(tmp_path):
+    """A real learning curve: the capacity search loses on a small training set
+    (it overfits its own holdout) and wins on a larger one."""
+    small = make_competition(
+        CompetitionSpec("lc-small", "binary", n_train=600, n_test=500,
+                        difficulty=0.4, n_teams=100, seed=7), tmp_path)
+    large = make_competition(
+        CompetitionSpec("lc-large", "binary", n_train=6000, n_test=500,
+                        difficulty=0.4, n_teams=100, seed=7), tmp_path)
+    small_delta = _score(small, tmp_path, "tuned") - _score(small, tmp_path, "linear")
+    large_delta = _score(large, tmp_path, "tuned") - _score(large, tmp_path, "linear")
+    assert large_delta > small_delta
+    assert large_delta > 0.01
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX only")
