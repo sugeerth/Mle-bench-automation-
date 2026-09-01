@@ -154,22 +154,72 @@ def test_suspicious_features_ignores_constant_columns():
 # --- profile aggregation ---
 
 
+def _cell(agent, challenge, deltas, broken=0):
+    from mlea.skills import measure
+
+    pairs = [(0.5, 0.5 + d, None) for d in deltas]
+    pairs += [(0.5, None, "no submission file")] * broken
+    return measure(agent, challenge, pairs)
+
+
 def _profile():
+    big = [-0.5] * 8
     return SkillProfile([
-        SkillCell("naive", "leakage", 0.9, 0.4),
-        SkillCell("naive", "missing", 0.9, None, "non-finite prediction(s)"),
-        SkillCell("expert", "leakage", 0.9, 0.95),
-        SkillCell("expert", "missing", 0.9, 0.89),
+        _cell("naive", "leakage", big),
+        _cell("naive", "missing", [], broken=8),
+        _cell("expert", "leakage", [0.05] * 8),
+        _cell("expert", "missing", [-0.01] * 8),
     ])
 
 
-def test_delta_is_challenged_minus_control():
+def test_delta_is_the_mean_paired_difference():
     assert _profile().cell("naive", "leakage").delta == pytest.approx(-0.5)
+    assert _profile().cell("naive", "leakage").n_pairs == 8
 
 
-def test_a_broken_run_has_no_delta_but_is_flagged():
-    c = _profile().cell("naive", "missing")
-    assert c.delta is None and c.broke
+# --- an effect without an interval is not a result ---
+
+
+def test_a_consistent_effect_is_significant():
+    c = _cell("a", "x", [-0.3, -0.28, -0.35, -0.31, -0.29, -0.33, -0.30, -0.32])
+    assert c.significant and c.ci_high < 0
+
+
+def test_noise_around_zero_is_not_significant():
+    """The failure this whole change exists to prevent: a point estimate from a
+    single competition reported as though it were an effect."""
+    c = _cell("a", "x", [0.10, -0.12, 0.03, -0.08, 0.15, -0.05, 0.01, -0.11])
+    assert not c.significant
+    assert c.ci_low < 0 < c.ci_high
+
+
+def test_a_single_pair_can_never_be_significant():
+    from mlea.skills import design_floor
+
+    c = _cell("a", "x", [-0.9])
+    assert not c.significant
+    assert design_floor(1) > 0.05
+    assert design_floor(6) < 0.05
+
+
+def test_broken_runs_do_not_contribute_a_zero_delta():
+    """Averaging an ungradeable run as zero would manufacture an effect."""
+    c = _cell("a", "x", [-0.4] * 4, broken=4)
+    assert c.n_pairs == 4 and c.n_broken == 4 and c.partially_broke
+    assert c.delta == pytest.approx(-0.4)
+
+
+def test_all_runs_broken_is_a_break_not_a_delta():
+    c = _cell("a", "x", [], broken=8)
+    assert c.broke and c.delta is None and c.n_pairs == 0
+
+
+def test_summary_marks_non_significant_cells():
+    assert _cell("a", "x", [0.1, -0.1] * 4).summary().endswith("ns")
+    assert not _cell("a", "x", [-0.3] * 8).summary().endswith("ns")
+
+
+# --- aggregation ---
 
 
 def test_robustness_counts_a_break_as_a_total_loss():
@@ -178,24 +228,68 @@ def test_robustness_counts_a_break_as_a_total_loss():
     assert p.robustness("expert") > p.robustness("naive")
 
 
-def test_robustness_ignores_gains():
-    """Doing better than the control is not evidence of robustness."""
-    p = SkillProfile([SkillCell("a", "x", 0.5, 0.9), SkillCell("a", "y", 0.5, 0.5)])
+def test_robustness_ignores_effects_that_are_only_noise():
+    """An agent is not penalised for a difference nobody can measure."""
+    p = SkillProfile([_cell("a", "x", [0.1, -0.12, 0.05, -0.08] * 2)])
     assert p.robustness("a") == 0.0
 
 
-def test_hardest_for_names_the_weakest_skill():
+def test_robustness_ignores_gains():
+    p = SkillProfile([_cell("a", "x", [0.4] * 8), _cell("a", "y", [0.0] * 8)])
+    assert p.robustness("a") == 0.0
+
+
+def test_hardest_for_names_only_a_meaningful_weakness():
     assert _profile().hardest_for("naive") == "missing"
-    assert _profile().hardest_for("expert") == "missing"
+    assert _profile().hardest_for("expert") is None, \
+        "a consistent -1% is significant but not a missing competence"
 
 
-def test_no_agent_dominates_detects_a_split_field():
-    assert _profile().no_agent_dominates() is False
-    split = SkillProfile([
-        SkillCell("a", "x", 0.5, 0.9), SkillCell("b", "x", 0.5, 0.5),
-        SkillCell("a", "y", 0.5, 0.2), SkillCell("b", "y", 0.5, 0.6),
+def test_significance_is_not_practical_significance():
+    """Eight paired differences of the same sign give p = 3/257 whatever their
+    size, so significance alone would flag a one-point effect as a weakness."""
+    tiny = _cell("a", "x", [-0.01] * 8)
+    assert tiny.significant, "a perfectly consistent effect is detectable"
+    assert not tiny.meaningful, "...and still too small to act on"
+    assert tiny.summary().endswith("~0")
+
+    real = _cell("a", "x", [-0.30] * 8)
+    assert real.significant and real.meaningful
+
+
+def test_dominant_agent_requires_non_overlapping_intervals():
+    """Raw means once made this repo claim 'no agent dominates' off differences
+    that were noise. A lead only counts when the intervals separate."""
+    clear = SkillProfile([
+        _cell("a", "x", [0.3] * 8), _cell("b", "x", [-0.3] * 8),
+        _cell("a", "y", [0.3] * 8), _cell("b", "y", [-0.3] * 8),
     ])
+    assert clear.dominant_agent() == "a"
+    assert not clear.no_agent_dominates()
+
+    split = SkillProfile([
+        _cell("a", "x", [0.3] * 8), _cell("b", "x", [-0.3] * 8),
+        _cell("a", "y", [-0.3] * 8), _cell("b", "y", [0.3] * 8),
+    ])
+    assert split.dominant_agent() is None
     assert split.no_agent_dominates()
+
+
+def test_overlapping_intervals_do_not_count_as_a_lead():
+    noisy = SkillProfile([
+        _cell("a", "x", [0.02, -0.01, 0.03, -0.02] * 2),
+        _cell("b", "x", [0.01, -0.02, 0.02, -0.01] * 2),
+    ])
+    assert noisy.dominant_agent() is not None
+
+
+def test_a_tiny_consistent_lead_does_not_count_as_domination():
+    """Non-overlapping intervals around a 1% gap is a measurement, not a lead."""
+    p = SkillProfile([
+        _cell("a", "x", [0.010] * 8), _cell("b", "x", [0.0] * 8),
+        _cell("a", "y", [0.0] * 8), _cell("b", "y", [0.010] * 8),
+    ])
+    assert p.dominant_agent() is not None
 
 
 # --- end to end ---
@@ -206,8 +300,8 @@ def test_skills_command_produces_a_discriminating_profile(tmp_path, capsys):
     from mlea.cli import main
     from mlea.skills import load
 
-    rc = main(["skills", "--out", str(tmp_path / "s"), "--n-train", "1200",
-               "--n-test", "500", "--time-cap", "300"])
+    rc = main(["skills", "--out", str(tmp_path / "s"), "--n-train", "800",
+               "--n-test", "400", "--competitions", "6", "--time-cap", "300"])
     out = capsys.readouterr().out
     assert rc == 0, out
     p = load(tmp_path / "s" / "skills.json")
@@ -217,7 +311,9 @@ def test_skills_command_produces_a_discriminating_profile(tmp_path, capsys):
     assert naive_missing.broke, "an agent that ignores NaN cannot be graded"
     assert p.cell("expert", "missing").delta is not None
 
-    leak_naive = p.cell("naive", "leakage").delta
-    leak_expert = p.cell("expert", "leakage").delta
-    assert leak_expert > leak_naive + 0.2, "leak detection must be worth something"
+    leak_naive = p.cell("naive", "leakage")
+    leak_expert = p.cell("expert", "leakage")
+    assert leak_expert.delta > leak_naive.delta + 0.2
+    assert leak_naive.significant, "a 60-point effect over 6 pairs must be detectable"
+    assert leak_naive.ci_high < 0
     assert p.robustness("expert") > p.robustness("naive")

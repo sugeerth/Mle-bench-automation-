@@ -336,7 +336,7 @@ def _headroom(session: Session) -> str:
     return "".join(parts)
 
 
-def _div_fill(delta: float | None, broke: bool) -> tuple[str, str]:
+def _div_fill(delta: float | None, broke: bool, significant: bool = True) -> tuple[str, str]:
     """Diverging scale: two hues that read as opposite, neutral at zero.
 
     Returns ``(fill, text-class)``. The strongest step is a *light* colour on the
@@ -349,6 +349,10 @@ def _div_fill(delta: float | None, broke: bool) -> tuple[str, str]:
         return "var(--div-neg-3)", "cellv strong"
     if delta is None:
         return "var(--track)", "cellv"
+    if not significant:
+        # An effect that cannot be distinguished from zero must not be coloured
+        # as though it were real. The number is still shown, marked "ns".
+        return "var(--div-zero)", "cellv"
     mag = abs(delta)
     if mag < 0.02:
         return "var(--div-zero)", "cellv"
@@ -367,7 +371,7 @@ def _skill_grid(profile: SkillProfile) -> str:
     agents, challenges = profile.agents, profile.challenges
     if not agents or not challenges:
         return ""
-    cw, ch_, labelw, top = 96, 34, 96, 30
+    cw, ch_, labelw, top = 104, 34, 96, 30
     width = labelw + len(challenges) * cw + 10
     height = top + len(agents) * ch_ + 8
     parts = [
@@ -390,16 +394,24 @@ def _skill_grid(profile: SkillProfile) -> str:
             x = labelw + ci * cw
             delta = None if cell is None else cell.delta
             broke = bool(cell and cell.broke)
+            sig = bool(cell and cell.meaningful)
             label = ("BROKE" if broke else "—" if delta is None
-                     else f"{delta:+.0%}")
+                     else (cell.summary() if cell else "—"))
             tip = f"{agent} · {chal}\n"
             if broke:
                 tip += f"no gradeable submission: {cell.failure}"
             elif cell is not None and delta is not None:
-                tip += (f"control {cell.control_percentile:.0%} → "
-                        f"challenged {cell.challenged_percentile:.0%}\n"
-                        f"cost {delta:+.0%} percentile points")
-            fill, text_class = _div_fill(delta, broke)
+                tip += (f"{delta:+.1%} percentile points over {cell.n_pairs} "
+                        f"paired competition(s)\n"
+                        f"95% CI [{cell.ci_low:+.1%}, {cell.ci_high:+.1%}]  "
+                        f"p={cell.p_value:.4f}")
+                if cell.significant and not cell.meaningful:
+                    tip += "\nsignificant but under 2 points — too small to act on"
+                elif not cell.significant:
+                    tip += "\nnot distinguishable from zero"
+                if cell.partially_broke:
+                    tip += f"\n{cell.n_broken} run(s) ungradeable"
+            fill, text_class = _div_fill(delta, broke, sig)
             parts.append(
                 f'<g class="dot" tabindex="0" data-tip="{_e(tip)}">'
                 f'<rect x="{x + 2}" y="{y + 2}" width="{cw - 4}" height="{ch_ - 4}" '
@@ -492,22 +504,27 @@ def render_dashboard(session: Session, comparison_note: str = "") -> str:
             f"<td>{_e(p.hardest_for(a) or '—')}</td></tr>"
             for a in sorted(p.agents, key=lambda a: -p.robustness(a))
         )
+        dominant = p.dominant_agent()
         verdict = (
             "<p class='note'><strong>No agent dominates.</strong> Different "
             "pathologies reward different competences, so a single headline score "
             "cannot say what an agent is missing — which is the argument for "
             "profiling rather than ranking.</p>"
-            if p.no_agent_dominates() else
-            "<p class='note'>One agent leads on every pathology, so for this field "
-            "a single score would have sufficed.</p>"
+            if dominant is None else
+            f"<p class='note'><strong>{_e(dominant)} is not measurably beaten on "
+            f"any pathology</strong>, so for this field a single score would have "
+            f"sufficed for <em>ranking</em>. The profile still says where the "
+            f"others lose, which a score cannot.</p>"
         )
         skills_section = f"""<section>
 <h2>Which competence is missing?</h2>
 <p class="note">Each pathology is generated alongside an otherwise identical clean
-control — same seed, same latent function — so the difference isolates one skill
-rather than reporting an aggregate that hides which one is absent. Blue is better
-than the control, red is worse, and <strong>BROKE</strong> means no gradeable
-submission at all.</p>
+control — same seed, same latent function — so the difference isolates one skill.
+Every cell is a mean over paired competitions with a bootstrap interval and a
+paired permutation test; <strong>ns</strong> means the effect is not
+distinguishable from zero, and those cells are drawn neutral rather than coloured
+as though they were real. <strong>BROKE</strong> means no gradeable submission at
+all.</p>
 <div class="scroll">{_skill_grid(p)}</div>
 {verdict}
 <div class="scroll" style="margin-top:16px"><table>

@@ -111,17 +111,19 @@ MLE-bench reports one number, and at 65% it is close to saturating. Neither meda
 percentile can say *what* an agent is missing — the only thing useful to someone improving it.
 
 Each pathology is generated alongside an **otherwise identical clean control** (same seed, same
-latent function, oracle score provably unchanged), so the difference isolates one skill:
+latent function, oracle score provably unchanged), so the difference isolates one skill. Every
+cell is 8 paired competitions with a bootstrap interval and a paired sign-flip test:
 
 |  | leakage | missing | outliers | shift | robustness |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| `naive` | −47% | **BROKE** | −86% | +1% | −58% |
-| `careful` | −61% | −1% | −18% | −26% | −26% |
-| `expert` | **+17%** | −1% | −18% | −26% | −11% |
+| `naive` | **−66%** | **BROKE** | **−87%** | +3% ns | −63% |
+| `careful` | **−48%** | +1% ns | −1% ns | −4% ns | −12% |
+| `expert` | **+12%** | +1% ns | −1% ns | −4% ns | +0% |
 
-**No agent dominates** — four pathologies, three different winners. `careful` is *worse* than
-`naive` on leakage, because its capacity search finds the leak more effectively and latches on
-harder. Nobody handles shift. On clean data all three look interchangeable.
+**Eight of twelve cells are indistinguishable from zero.** The first version of this table came
+from one competition per cell and produced three confident conclusions — two were noise and one
+had the sign backwards. See [`docs/SKILL-PROFILE.md`](docs/SKILL-PROFILE.md), which keeps the
+wrong version alongside the corrected one.
 
 See [`docs/SKILL-PROFILE.md`](docs/SKILL-PROFILE.md).
 
@@ -275,7 +277,7 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
 - [x] `mlea probe` — contamination probe with a working positive control
 - [x] `mlea dashboard` — comparative UI across every agent
-- [x] `mlea skills` — skill profiling against matched clean controls (357 tests total)
+- [x] `mlea skills` — skill profiling against matched clean controls (366 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 against real **Kaggle** data — the pipeline now runs end to end on generated
       competitions, but has still never touched a real competition. Doable for **$0**, see

@@ -145,35 +145,42 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
 
 
 def _cmd_skills(args: argparse.Namespace) -> int:
-    """Profile which ML competences each agent has."""
+    """Profile which ML competences each agent has, with intervals."""
     from .bench import CHALLENGES, CompetitionSpec, make_competition
-    from .skills import SkillCell, SkillProfile
+    from .skills import SkillProfile, design_floor, measure
 
     out = Path(args.out)
     data = out / "data"
     challenges = args.challenge or sorted(CHALLENGES)
     agents = args.agent or ["naive", "careful", "expert"]
+    seeds = list(range(args.seed, args.seed + args.competitions))
 
-    specs: dict[str, tuple[CompetitionSpec, CompetitionSpec]] = {}
-    for ch in challenges:
-        base = CompetitionSpec(
-            f"skill-{ch}", args.task, n_train=args.n_train, n_test=args.n_test,
-            difficulty=args.difficulty, n_teams=args.n_teams, seed=args.seed,
-            challenges=frozenset({ch}),
+    def spec_for(ch: str | None, seed: int) -> CompetitionSpec:
+        name = f"skill-{ch or 'control'}-s{seed}"
+        return CompetitionSpec(
+            name, args.task, n_train=args.n_train, n_test=args.n_test,
+            difficulty=args.difficulty, n_teams=args.n_teams, seed=seed,
+            challenges=frozenset({ch}) if ch else frozenset(),
         )
-        make_competition(base, data)
-        make_competition(base.control(), data)
-        specs[ch] = (base, base.control())
-    print(f"1. generated {len(challenges)} challenge(s), each with a matched control")
+
+    # One control per seed, shared across challenges: with the same seed and no
+    # pathology they are the identical competition, so generating and running it
+    # per challenge would only buy noise.
+    for seed in seeds:
+        make_competition(spec_for(None, seed), data)
+        for ch in challenges:
+            make_competition(spec_for(ch, seed), data)
+    print(f"1. generated {len(seeds)} competition(s) x {len(challenges)} "
+          f"pathology, each with a shared matched control")
 
     def run_and_score(agent: str, comp_id: str) -> tuple[float | None, str | None]:
         comp = data / comp_id
         task = Task(comp_id, resolve_competition_data_dir(data, comp_id), seed=0)
         cfg = RunConfig(output_root=out / "runs" / agent, force=True,
                         time_cap_seconds=args.time_cap, checkpoint_marks=())
-        cmd = CommandAgent(
-            agent, f"{sys.executable} -m mlea.baseline --strategy {agent}")
-        res = run_one(cmd, task, cfg)
+        res = run_one(
+            CommandAgent(agent, f"{sys.executable} -m mlea.baseline "
+                                f"--strategy {agent}"), task, cfg)
         rep = grade_submission(res.submission_path, comp)
         if not rep.valid_submission:
             return None, rep.error or "no submission"
@@ -184,38 +191,46 @@ def _cmd_skills(args: argparse.Namespace) -> int:
 
     profile = SkillProfile()
     for agent in agents:
+        controls = {s: run_and_score(agent, spec_for(None, s).id) for s in seeds}
         for ch in challenges:
-            base, control = specs[ch]
-            ctrl_pct, ctrl_err = run_and_score(agent, control.id)
-            chal_pct, chal_err = run_and_score(agent, base.id)
-            profile.cells.append(
-                SkillCell(agent, ch, ctrl_pct, chal_pct, chal_err or None)
-            )
+            pairs = []
+            for seed in seeds:
+                ctrl_pct, ctrl_err = controls[seed]
+                chal_pct, chal_err = run_and_score(agent, spec_for(ch, seed).id)
+                pairs.append((ctrl_pct, chal_pct, chal_err or ctrl_err))
+            profile.cells.append(measure(agent, ch, pairs, alpha=args.alpha))
         worst = profile.hardest_for(agent)
         print(f"2. {agent:9} robustness {profile.robustness(agent):+7.1%}  "
-              f"weakest: {worst}")
+              f"weakest: {worst or 'nothing measurable'}")
 
     (out / "skills.json").write_text(json.dumps(profile.to_dict(), indent=2))
 
-    print("\n3. cost of each pathology, in leaderboard percentile points")
-    header = "   " + f"{'agent':10}" + "".join(f"{c:>13}" for c in challenges)
-    print(header)
+    floor = design_floor(len(seeds))
+    print(f"\n3. cost of each pathology, in leaderboard percentile points")
+    print(f"   {len(seeds)} paired competition(s) per cell; 95% CI in brackets; "
+          f"'ns' = not distinguishable from zero")
+    if floor >= args.alpha:
+        print(f"   !! {len(seeds)} pairs cannot reach p<{args.alpha} at any effect "
+              f"size (floor {floor:.3f}). Raise --competitions.")
     for agent in agents:
-        row = f"   {agent:10}"
+        print(f"   {agent}")
         for ch in challenges:
             cell = profile.cell(agent, ch)
             if cell is None:
-                row += f"{'—':>13}"
-            elif cell.broke:
-                row += f"{'BROKE':>13}"
-            elif cell.delta is None:
-                row += f"{'—':>13}"
-            else:
-                row += f"{cell.delta:>+12.0%} "
-        print(row)
+                continue
+            if cell.broke:
+                print(f"      {ch:10} BROKE on all {cell.n_broken}: {cell.failure}")
+                continue
+            extra = (f"  ({cell.n_broken} run(s) ungradeable)"
+                     if cell.partially_broke else "")
+            mark = "" if cell.significant else "   ns"
+            print(f"      {ch:10} {cell.delta:+7.1%}  "
+                  f"[{cell.ci_low:+.1%}, {cell.ci_high:+.1%}]  "
+                  f"p={cell.p_value:.4f}{mark}{extra}")
 
     print()
-    if profile.no_agent_dominates():
+    dominant = profile.dominant_agent()
+    if dominant is None:
         best = {
             ch: max(
                 (c for c in profile.cells
@@ -226,12 +241,12 @@ def _cmd_skills(args: argparse.Namespace) -> int:
         wins = ", ".join(
             f"{ch}: {c.agent}" for ch, c in best.items() if c is not None)
         print(f"   NO AGENT DOMINATES — {wins}")
-        print("   Different challenges reward different competences, so a single")
-        print("   headline score cannot say what an agent is missing. That is the")
-        print("   whole argument for profiling rather than ranking.")
+        print("   Different pathologies reward different competences, so a single")
+        print("   headline score cannot say what an agent is missing.")
     else:
-        print("   One agent leads on every challenge; a single score would suffice "
-              "for this field.")
+        print(f"   {dominant.upper()} DOMINATES — it is not measurably beaten on any")
+        print("   pathology, so for this field a single score would have sufficed.")
+        print("   The profile still says WHERE the others lose, which a score cannot.")
     return 0
 
 
@@ -878,7 +893,11 @@ def build_parser() -> argparse.ArgumentParser:
     sk.add_argument("--n-test", type=int, default=600)
     sk.add_argument("--difficulty", type=float, default=0.4)
     sk.add_argument("--n-teams", type=int, default=200)
-    sk.add_argument("--seed", type=int, default=3)
+    sk.add_argument("--seed", type=int, default=3, help="first competition seed")
+    sk.add_argument("--competitions", type=int, default=8,
+                    help="paired competitions per cell; below 6 no paired test "
+                         "can reach p<0.05 at any effect size")
+    sk.add_argument("--alpha", type=float, default=0.05)
     sk.add_argument("--time-cap", type=float, default=300.0)
     sk.set_defaults(func=_cmd_skills)
 
