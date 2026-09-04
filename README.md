@@ -32,6 +32,38 @@ stages agree with each other. It takes about a minute.
 SELFTEST PASSED
 ```
 
+### `mlea conform` — checked against the real MLE-bench
+
+Every earlier version carried the same caveat: it had never touched real MLE-bench. It graded
+its own competitions with its own metrics and could not know whether any of it matched.
+
+Upstream's grading code turns out to be importable and runnable without a Kaggle account —
+only `prepare` needs one. So a competition can be generated in a **real competition's
+submission schema** and graded by that **competition's own grader**, with both scores compared
+exactly.
+
+```
+48/48 agreed within 0.0
+CONFORMANT — this package's grader matches every real grader tested,
+on both valid submissions and the ones a grader should reject.
+```
+
+12 real competitions (11 AUC, 1 RMSE; 8 of them in the lite split), each checked on three
+valid submissions and one malformed one. Three bugs it found, all invisible while the package
+only graded itself:
+
+- **Upstream rounds every score to 5 decimals** (`round(score, 5)`). My grader matched
+  scikit-learn to the last bit and therefore *disagreed* with upstream. Upstream's own Known
+  Issues flag three competitions dense enough that a fifth decimal moves a medal.
+- **A real schema is more than column names.** `petfinder-pawpularity-score` rejects any
+  target outside `[1, 100]`; right names with the wrong domain meant every valid agent was
+  refused before scoring.
+- **Raw model output is an invalid submission** — the AUC helper rejects anything outside
+  `[0, 1]` rather than ranking it.
+
+Upstream is optional and not a dependency; the tests skip cleanly without it.
+See [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+
 ### Why generated competitions
 
 MLE-bench needs a Kaggle account **and** a rules-acceptance click that cannot be automated —
@@ -235,6 +267,7 @@ Everything else here is **planning documents**.
 | [`docs/PROPOSAL-anytime-eval.md`](docs/PROPOSAL-anytime-eval.md) | Demoted — anytime checkpointing, kept as cheap triage instrumentation |
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
+| [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) | Checked against 12 **real** MLE-bench competitions and their own graders — 48/48 exact |
 | [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
 | [`docs/CONTAMINATION-PROBE.md`](docs/CONTAMINATION-PROBE.md) | A contamination probe with a positive control — and three findings about how to measure contamination at all |
 | [`docs/SKILL-PROFILE.md`](docs/SKILL-PROFILE.md) | A benchmark that says *which* ML competence an agent is missing, not just how well it scored |
@@ -277,8 +310,9 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
 - [x] `mlea probe` — contamination probe with a working positive control
 - [x] `mlea dashboard` — comparative UI across every agent
-- [x] `mlea skills` — skill profiling against matched clean controls (366 tests total)
+- [x] `mlea skills` — skill profiling against matched clean controls
+- [x] `mlea conform` — grader verified against 12 real MLE-bench competitions (379 tests total)
 - [ ] Plan reviewed
-- [ ] Phase 0 against real **Kaggle** data — the pipeline now runs end to end on generated
-      competitions, but has still never touched a real competition. Doable for **$0**, see
+- [ ] Phase 0 against real **Kaggle** data — grading, the submission contract and rejection
+      behaviour are now verified against real competitions, but the *data* is still synthetic. Doable for **$0**, see
       [the free-tier recipe](docs/SOTA-AND-FREE-TIER.md#part-2--running-it-for-0)

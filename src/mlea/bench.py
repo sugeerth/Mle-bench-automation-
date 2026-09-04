@@ -90,6 +90,14 @@ class CompetitionSpec:
     seed: int = 0
     #: Pathologies to inject. Empty is the clean control.
     challenges: frozenset[str] = frozenset()
+    #: Submission column names. Default to this package's own convention;
+    #: :func:`mlea.upstream.read_schema` supplies a real competition's.
+    id_column: str = "id"
+    target_column: str = "target"
+    #: The real competition whose schema this borrows, for provenance.
+    upstream_id: str | None = None
+    #: Inclusive bounds the grader enforces on the target, if any.
+    target_range: tuple[float, float] | None = None
 
     def __post_init__(self) -> None:
         if self.task not in TASKS:
@@ -263,6 +271,40 @@ once. {target_hint}
 """
 
 
+def from_upstream(
+    competition_id: str, *, id: str | None = None, **kwargs
+) -> CompetitionSpec:
+    """A spec that borrows a **real** MLE-bench competition's submission schema.
+
+    The generated data is still synthetic -- the Kaggle bytes need an account and
+    a rules click that cannot be automated -- but the column names, the metric
+    and the task shape are the real competition's, so the resulting competition
+    can be graded by that competition's own grader.
+    """
+    from .upstream import read_schema
+
+    schema = read_schema(competition_id)
+    if schema is None:
+        raise ValueError(
+            f"{competition_id!r} does not state its submission columns in a form "
+            f"that can be read without the prepared data"
+        )
+    if schema.kind is None:
+        raise ValueError(
+            f"{competition_id!r} is scored by {schema.metric!r}, which this "
+            f"generator cannot synthesise data for"
+        )
+    return CompetitionSpec(
+        id=id or f"real-{competition_id}",
+        task=schema.kind,
+        id_column=schema.id_column,
+        target_column=schema.target_column,
+        upstream_id=competition_id,
+        target_range=schema.target_range,
+        **kwargs,
+    )
+
+
 def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
     """Create one competition on disk in the mle-bench prepared layout.
 
@@ -288,14 +330,31 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
         # Best achievable prediction given X: the noise-free latent signal.
         # (Using `noisy` would leak the label and score a meaningless 1.0.)
         clean = signal
-        target_hint = "Predictions may be any real number; only their ranking matters."
+        target_hint = (
+            "Predictions must be probabilities in [0, 1]. (Upstream's AUC grader "
+            "rejects anything outside that range outright, rather than ranking it.)"
+        )
         task_line = (
             "Predict the probability that each row belongs to the positive class."
         )
     else:
         y = 10.0 + 3.0 * noisy
         clean = 10.0 + 3.0 * signal
-        target_hint = "Predictions are real-valued."
+        if spec.target_range is not None:
+            # Map into the domain the real grader enforces. Without this the
+            # generated answers themselves would be out of range, and every
+            # submission would be rejected before it was ever scored.
+            lo, hi = spec.target_range
+            span = y.max() - y.min()
+            scale = (hi - lo) / span if span > 0 else 1.0
+            y = lo + (y - y.min()) * scale
+            clean = lo + (clean - clean.min()) * scale
+            clean = np.clip(clean, lo, hi)
+        target_hint = (
+            f"Predictions are real-valued"
+            + (f" and must lie in [{spec.target_range[0]:g}, "
+               f"{spec.target_range[1]:g}]." if spec.target_range else ".")
+        )
         task_line = "Predict the continuous target for each row."
 
     X_train, X_test = X[: spec.n_train].copy(), X[spec.n_train :].copy()
@@ -338,7 +397,7 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
         X_train = np.hstack([X_train, np.column_stack(extra_train)])
         X_test = np.hstack([X_test, np.column_stack(extra_test)])
 
-    id_column, target_column = "id", "target"
+    id_column, target_column = spec.id_column, spec.target_column
     feats = [f"f{i}" for i in range(spec.n_features)] + extra_names
     train_ids = [f"train_{i}" for i in range(spec.n_train)]
     test_ids = [f"test_{i}" for i in range(spec.n_test)]
@@ -406,6 +465,8 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
                 "difficulty": spec.difficulty,
                 "seed": spec.seed,
                 "challenges": sorted(spec.challenges),
+                "upstream_id": spec.upstream_id,
+                "target_range": list(spec.target_range) if spec.target_range else None,
                 "thresholds": {
                     "gold": thresholds.gold, "silver": thresholds.silver,
                     "bronze": thresholds.bronze, "median": thresholds.median,
@@ -599,6 +660,7 @@ def make_suite(root: str | Path, specs: tuple[CompetitionSpec, ...] = SUITE) -> 
 
 __all__ = [
     "CHALLENGES",
+    "from_upstream",
     "CLONE_TRANSFORMS",
     "CompetitionSpec",
     "clone_competition",

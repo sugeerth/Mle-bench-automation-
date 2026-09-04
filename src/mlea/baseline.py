@@ -34,12 +34,14 @@ STRATEGIES = MODELLING + FAILING + PROBING
 MEMORY_KEYS = ("names", "values")
 
 
-def _read_csv(path: Path) -> tuple[list[str], np.ndarray, np.ndarray | None]:
+def _read_csv(path: Path, target_column: str = "target") -> tuple[
+    list[str], np.ndarray, np.ndarray | None
+]:
     with path.open(newline="") as fh:
         rows = list(csv.reader(fh))
     header, body = rows[0], rows[1:]
     ids = [r[0] for r in body]
-    has_target = header[-1] == "target"
+    has_target = header[-1] == target_column
     end = -1 if has_target else len(header)
     # An empty cell is a missing value. Parsing it as NaN rather than crashing is
     # itself a competence: a naive agent that lets NaN through emits NaN
@@ -52,9 +54,9 @@ def _read_csv(path: Path) -> tuple[list[str], np.ndarray, np.ndarray | None]:
     return ids, X, y
 
 
-def feature_names(path: Path) -> list[str]:
-    header = path.read_text().split("\n", 1)[0].split(",")
-    return header[1:-1] if header[-1] == "target" else header[1:]
+def feature_names(path: Path, target_column: str = "target") -> list[str]:
+    header = path.read_text().split("\n", 1)[0].strip().split(",")
+    return header[1:-1] if header[-1] == target_column else header[1:]
 
 
 def impute(X: np.ndarray, means: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
@@ -140,7 +142,23 @@ def _ridge(X: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
     return np.linalg.solve(X.T @ X + alpha * np.eye(X.shape[1]), X.T @ y)
 
 
-def _write(path: Path, ids: list[str], preds: np.ndarray) -> None:
+def _squash(preds: np.ndarray) -> np.ndarray:
+    """Map arbitrary scores into [0, 1], preserving order.
+
+    Upstream's AUC grader rejects any value outside [0, 1] outright rather than
+    ranking it, so a linear model's raw output is an *invalid submission* on a
+    real competition even though it ranks perfectly. Rank-normalising is what a
+    competent agent does; it leaves AUC unchanged.
+    """
+    preds = np.asarray(preds, dtype=float)
+    if preds.size == 0:
+        return preds
+    order = np.argsort(np.argsort(preds))
+    return (order + 0.5) / preds.size
+
+
+def _write(path: Path, ids: list[str], preds: np.ndarray,
+           columns: tuple[str, str] = ("id", "target")) -> None:
     """Write atomically.
 
     The harness snapshots this file on a timer from another thread. A plain
@@ -152,7 +170,7 @@ def _write(path: Path, ids: list[str], preds: np.ndarray) -> None:
     tmp = path.with_suffix(".csv.tmp")
     with tmp.open("w", newline="") as fh:
         w = csv.writer(fh)
-        w.writerow(["id", "target"])
+        w.writerow(list(columns))
         w.writerows([[i, f"{p:.6f}"] for i, p in zip(ids, preds)])
     tmp.replace(path)
 
@@ -209,6 +227,16 @@ def main(argv: list[str] | None = None) -> int:
     sub_path = Path(os.environ["SUBMISSION_PATH"])
     strategy = args.strategy
 
+    # Learn the submission columns from sample_submission.csv, as a real agent
+    # does. On a real competition these are never `id,target` -- they are
+    # whatever that competition chose, e.g. request_id,requester_received_pizza.
+    sample = data_dir / "sample_submission.csv"
+    columns = ("id", "target")
+    if sample.exists():
+        head = sample.read_text().split("\n", 1)[0].strip().split(",")
+        if len(head) >= 2:
+            columns = (head[0], head[1])
+
     if strategy == "silent":
         print("thought about it, wrote nothing", flush=True)
         return 0
@@ -221,9 +249,21 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr, flush=True)
         return 1
 
-    train_ids, X_tr, y_tr = _read_csv(data_dir / "train.csv")
-    test_ids, X_te, _ = _read_csv(data_dir / "test.csv")
+    target_column = columns[1]
+    train_ids, X_tr, y_tr = _read_csv(data_dir / "train.csv", target_column)
+    test_ids, X_te, _ = _read_csv(data_dir / "test.csv", target_column)
     assert y_tr is not None
+    # A 0/1 target means the grader wants probabilities, not raw scores.
+    is_probability = bool(np.all(np.isin(y_tr[~np.isnan(y_tr)], (0.0, 1.0))))
+
+    # A regression target has a domain, and real graders enforce it. Clipping to
+    # the range seen in training is both what a competent agent does and what
+    # keeps the submission gradeable at all.
+    y_lo, y_hi = float(np.nanmin(y_tr)), float(np.nanmax(y_tr))
+
+    def emit(preds: np.ndarray) -> None:
+        values = _squash(preds) if is_probability else np.clip(preds, y_lo, y_hi)
+        _write(sub_path, test_ids, values, columns)
 
     if strategy == "memorizer":
         import json
@@ -239,7 +279,7 @@ def main(argv: list[str] | None = None) -> int:
         hit_rate = sum(h is not None for h in hits) / max(len(hits), 1)
         if hit_rate >= 0.9:
             _write(sub_path, test_ids,
-                   np.array([h if h is not None else 0.0 for h in hits]))
+                   np.array([h if h is not None else 0.0 for h in hits]), columns)
             print(f"RECALLED {hit_rate:.0%} of rows from memory", flush=True)
             return 0
         print(f"recalled only {hit_rate:.0%} of rows; solving honestly", flush=True)
@@ -250,19 +290,20 @@ def main(argv: list[str] | None = None) -> int:
         sub_path.parent.mkdir(parents=True, exist_ok=True)
         with sub_path.open("w", newline="") as fh:
             w = csv.writer(fh)
-            w.writerow(["id", "prediction"])
+            w.writerow([columns[0], "prediction"])  # plausible bug: wrong name
             w.writerows([[i, "0.5"] for i in test_ids])
         print("wrote submission", flush=True)
         return 0
 
     if strategy == "constant":
-        _write(sub_path, test_ids, np.full(len(test_ids), float(np.mean(y_tr))))
+        value = float(np.nanmean(y_tr))
+        _write(sub_path, test_ids, np.full(len(test_ids), value), columns)
         print("wrote constant baseline", flush=True)
         return 0
 
     if strategy == "linear":
-        beta = _ridge(_design(X_tr, 1), y_tr, 1.0)
-        _write(sub_path, test_ids, _design(X_te, 1) @ beta)
+        beta = _ridge(_design(np.nan_to_num(X_tr), 1), y_tr, 1.0)
+        emit(_design(np.nan_to_num(X_te), 1) @ beta)
         print("fit ridge on raw features", flush=True)
         return 0
 
@@ -308,7 +349,7 @@ def main(argv: list[str] | None = None) -> int:
         if best_pred is None:
             print("no model fit", file=sys.stderr, flush=True)
             return 1
-        _write(sub_path, test_ids, best_pred)
+        emit(best_pred)
         print(f"{strategy}: best holdout {best:.5f}", flush=True)
         return 0
 
@@ -323,7 +364,7 @@ def main(argv: list[str] | None = None) -> int:
             if score > best:
                 best, best_capacity = score, capacity
                 best_beta = _ridge(_design(X_tr, capacity), y_tr, alpha)
-                _write(sub_path, test_ids, _design(X_te, best_capacity) @ best_beta)
+                emit(_design(X_te, best_capacity) @ best_beta)
                 print(f"improved: capacity={capacity} alpha={alpha} "
                       f"holdout={score:.5f}", flush=True)
             if args.think_seconds:

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import subprocess
 import sys
 
 import numpy as np
@@ -142,6 +144,105 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     path = write_dashboard(root, args.out, args.title, note)
     print(f"wrote {path}")
     return 0
+
+
+def _cmd_conform(args: argparse.Namespace) -> int:
+    """Grade the same submissions with our grader and the real one, and compare.
+
+    This is the check that makes the package an MLE-bench harness rather than a
+    harness for its own idea of a competition. For every real competition whose
+    submission schema can be read, it generates data in that schema, has real
+    agents produce submissions, and grades each one twice: once with
+    ``mlea.grade`` and once with that competition's **own grader** loaded from
+    upstream. A disagreement is a bug in this package.
+    """
+    from .bench import from_upstream, make_competition
+    from .grade import grade_submission
+    from . import upstream
+
+    if not upstream.available():
+        print(f"error: {upstream.INSTALL_HINT}", file=sys.stderr)
+        return 2
+
+    schemas = upstream.synthesisable_schemas()
+    if args.competition:
+        wanted = set(args.competition)
+        schemas = [s for s in schemas if s.competition_id in wanted]
+        missing = wanted - {s.competition_id for s in schemas}
+        if missing:
+            print(f"error: not synthesisable: {sorted(missing)}", file=sys.stderr)
+            return 2
+    schemas = schemas[: args.limit] if args.limit else schemas
+
+    data = Path(args.out) / "data"
+    print(f"checking {len(schemas)} real competition(s) against their own graders\n")
+    print(f"   {'competition':44} {'strategy':9} {'mlea':>9} {'upstream':>9}  agree")
+
+    disagreements: list[str] = []
+    checked = 0
+    for schema in schemas:
+        spec = from_upstream(
+            schema.competition_id, n_train=args.n_train, n_test=args.n_test,
+            n_teams=60, difficulty=0.4, seed=args.seed,
+        )
+        comp = make_competition(spec, data)
+        answers_csv = comp / "prepared" / "private" / "answers.csv"
+        _write_answers_csv(comp, spec, answers_csv)
+
+        for strategy in ("constant", "linear", "tuned", "broken"):
+            sub = comp / f"sub-{strategy}.csv"
+            env = dict(
+                os.environ,
+                DATA_DIR=str(comp / "prepared" / "public"),
+                SUBMISSION_PATH=str(sub),
+            )
+            subprocess.run(
+                [sys.executable, "-m", "mlea.baseline", "--strategy", strategy],
+                env=env, capture_output=True, text=True, timeout=args.time_cap,
+            )
+            ours = grade_submission(sub, comp)
+            theirs, err = (
+                upstream.grade_with_upstream(sub, answers_csv, schema.competition_id)
+                if sub.exists() else (None, "no submission")
+            )
+            checked += 1
+            agree = (
+                (ours.score is None and theirs is None)
+                or (ours.score is not None and theirs is not None
+                    and abs(ours.score - theirs) <= args.tolerance)
+            )
+            fmt = lambda v: "reject" if v is None else f"{v:.5f}"
+            print(f"   {schema.competition_id:44} {strategy:9} "
+                  f"{fmt(ours.score):>9} {fmt(theirs):>9}  "
+                  f"{'yes' if agree else 'NO'}")
+            if not agree:
+                disagreements.append(
+                    f"{schema.competition_id}/{strategy}: "
+                    f"mlea={fmt(ours.score)} upstream={fmt(theirs)}"
+                )
+
+    print(f"\n{checked - len(disagreements)}/{checked} agreed "
+          f"within {args.tolerance}")
+    if disagreements:
+        print("\nDISAGREEMENTS", file=sys.stderr)
+        for d in disagreements:
+            print(f"  {d}", file=sys.stderr)
+        return 1
+    print("\nCONFORMANT — this package's grader matches every real grader tested,")
+    print("on both valid submissions and the ones a grader should reject.")
+    return 0
+
+
+def _write_answers_csv(comp: Path, spec, out: Path) -> None:
+    """Upstream graders take an answers DataFrame; ours takes answers.json."""
+    import csv as _csv
+
+    answers = json.loads((comp / "prepared/private/answers.json").read_text())
+    with out.open("w", newline="") as fh:
+        w = _csv.writer(fh)
+        w.writerow([spec.id_column, spec.target_column])
+        for k, v in answers.items():
+            w.writerow([k, int(v) if spec.task == "binary" else v])
 
 
 def _cmd_skills(args: argparse.Namespace) -> int:
@@ -882,6 +983,22 @@ def build_parser() -> argparse.ArgumentParser:
     db.add_argument("--note", help="text file whose contents are shown verbatim as "
                                    "the statistical comparison")
     db.set_defaults(func=_cmd_dashboard)
+
+    cf = sub.add_parser(
+        "conform",
+        help="check our grader against real MLE-bench graders on real schemas")
+    cf.add_argument("--out", default="conform")
+    cf.add_argument("--competition", action="append",
+                    help="repeatable; defaults to every synthesisable one")
+    cf.add_argument("--limit", type=int)
+    cf.add_argument("--n-train", type=int, default=600)
+    cf.add_argument("--n-test", type=int, default=400)
+    cf.add_argument("--seed", type=int, default=5)
+    cf.add_argument("--tolerance", type=float, default=0.0,
+                    help="both graders round to 5 decimals, so exact agreement "
+                         "is the right bar")
+    cf.add_argument("--time-cap", type=float, default=300.0)
+    cf.set_defaults(func=_cmd_conform)
 
     sk = sub.add_parser("skills", help="profile which ML competences an agent has")
     sk.add_argument("--out", default="skills")

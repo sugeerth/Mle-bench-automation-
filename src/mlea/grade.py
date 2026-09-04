@@ -31,6 +31,11 @@ import numpy as np
 from .metrics import InvalidSubmission, get_metric
 
 
+#: Upstream rounds every graded score to this many decimals before comparing it
+#: against medal thresholds (``mlebench/grade_helpers.py::Grader.__call__``).
+UPSTREAM_SCORE_DECIMALS = 5
+
+
 @dataclass(frozen=True)
 class MedalThresholds:
     """Score values at the gold/silver/bronze rank positions."""
@@ -213,7 +218,12 @@ def grade_submission(
         return report
 
     report.valid_submission = True
-    report.score = score
+    # Upstream's Grader.__call__ returns round(score, 5). Matching it exactly is
+    # what makes a score here directly comparable to a published MLE-bench
+    # number, and it is not a cosmetic detail: upstream's own Known Issues flag
+    # three competitions whose leaderboards are dense enough that a fifth-decimal
+    # difference can move a medal.
+    report.score = round(score, UPSTREAM_SCORE_DECIMALS)
     t = MedalThresholds(**spec["thresholds"])
     report.thresholds = spec["thresholds"]
     gib = metric.greater_is_better
@@ -243,6 +253,7 @@ def grade_jsonl(
 
 __all__ = [
     "GradingReport",
+    "UPSTREAM_SCORE_DECIMALS",
     "MedalThresholds",
     "grade_jsonl",
     "grade_submission",
