@@ -1,8 +1,12 @@
 # MLE-bench Automation
 
-Automation harness for running [MLE-bench](https://github.com/openai/mle-bench) (OpenAI's
-Kaggle-competition benchmark for ML engineering agents) repeatably, cheaply, and as a
-regression signal rather than a one-off leaderboard stunt.
+Evaluation infrastructure for agent benchmarks — [MLE-bench](https://github.com/openai/mle-bench)
+(Kaggle competitions for ML-engineering agents) and
+[SWE-bench](https://github.com/SWE-bench/SWE-bench) (GitHub issues for coding agents) — run
+repeatably, cheaply, and as a regression signal rather than a one-off leaderboard stunt.
+
+Both graders are **verified against the real upstream graders**: 48/48 exact on 12 real
+MLE-bench competitions, 15/15 on the full SWE-bench resolution breakdown.
 
 ## `mlea` — a working eval pipeline
 
@@ -63,6 +67,31 @@ only graded itself:
 
 Upstream is optional and not a dependency; the tests skip cleanly without it.
 See [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md).
+
+### `mlea swe-conform` — the same treatment for SWE-bench
+
+SWE-bench is Docker-heavy, and that obscures a useful fact: **containers exist to *produce* a
+test log. Deciding what a log means is log parsing plus set comparison**, and runs anywhere. So
+upstream's real `get_eval_report` — 57 log parsers, the real FAIL_TO_PASS/PASS_TO_PASS logic —
+works with a plain `pip install swebench`.
+
+```
+15/15 agreed on the full FAIL_TO_PASS and PASS_TO_PASS breakdown
+CONFORMANT — our resolver matches the real SWE-bench grader on every
+branch of the rule: resolved, unresolved, regressed, and patch-apply failure.
+```
+
+SWE-bench has the thing MLE-bench lacks: **a mechanical correctness oracle.** An instance is
+well-formed iff its gold patch flips FAIL_TO_PASS and leaves PASS_TO_PASS alone. So the
+generator *measures* those sets rather than declaring them, and refuses to emit an instance
+that fails its own oracle.
+
+**The bug conformance found:** on a patch that fails to apply, this package marked every test
+as failed; upstream leaves the sets empty. Both said unresolved, so comparing only the boolean
+would have missed it — but upstream is right: an unapplied patch is *no evidence*, not evidence
+of failure, and claiming otherwise would blame an agent whose patch never ran.
+
+See [`docs/SWE-BENCH.md`](docs/SWE-BENCH.md).
 
 ### Why generated competitions
 
@@ -268,6 +297,7 @@ Everything else here is **planning documents**.
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
 | [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) | Checked against 12 **real** MLE-bench competitions and their own graders — 48/48 exact |
+| [`docs/SWE-BENCH.md`](docs/SWE-BENCH.md) | The same treatment for SWE-bench — 15/15 against the real grader, and the bug it found |
 | [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
 | [`docs/CONTAMINATION-PROBE.md`](docs/CONTAMINATION-PROBE.md) | A contamination probe with a positive control — and three findings about how to measure contamination at all |
 | [`docs/SKILL-PROFILE.md`](docs/SKILL-PROFILE.md) | A benchmark that says *which* ML competence an agent is missing, not just how well it scored |
@@ -311,7 +341,8 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea probe` — contamination probe with a working positive control
 - [x] `mlea dashboard` — comparative UI across every agent
 - [x] `mlea skills` — skill profiling against matched clean controls
-- [x] `mlea conform` — grader verified against 12 real MLE-bench competitions (379 tests total)
+- [x] `mlea conform` — grader verified against 12 real MLE-bench competitions
+- [x] `mlea swe-conform` — SWE-bench resolver verified against the real grader (403 tests total)
 - [ ] Plan reviewed
 - [ ] Phase 0 against real **Kaggle** data — grading, the submission contract and rejection
       behaviour are now verified against real competitions, but the *data* is still synthetic. Doable for **$0**, see

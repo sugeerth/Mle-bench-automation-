@@ -146,6 +146,88 @@ def _cmd_dashboard(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_swe_conform(args: argparse.Namespace) -> int:
+    """Grade the same SWE-bench logs with our resolver and the real one."""
+    from .swe import (
+        EXPECTED, STRATEGIES, grade_log, make_suite, patch_for, run_agent, upstream,
+    )
+
+    if not upstream.available():
+        print(f"error: {upstream.INSTALL_HINT}", file=sys.stderr)
+        return 2
+
+    out = Path(args.out)
+    instances = make_suite(out / "instances")
+    strategies = args.strategy or list(STRATEGIES)
+    print(f"{len(instances)} instance(s), each self-verified against its gold patch")
+    print(f"grading with our resolver and upstream's {len(upstream.parsers())}-parser "
+          f"grader\n")
+    print(f"   {'instance':26} {'agent':11} {'ours':34} {'upstream':11}  agree")
+
+    disagreements: list[str] = []
+    wrong_outcome: list[str] = []
+    checked = 0
+    for inst in instances:
+        for strategy in strategies:
+            log = run_agent(inst, patch_for(inst, strategy), workdir=out / "work")
+            log_path = out / "logs" / f"{inst.instance_id}-{strategy}.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_path.write_text(log)
+
+            ours = grade_log(log, inst.fail_to_pass, inst.pass_to_pass,
+                             inst.instance_id)
+            theirs = upstream.grade_with_upstream(
+                log_path, inst.instance_id, inst.fail_to_pass, inst.pass_to_pass)
+            checked += 1
+
+            their_status = theirs.get("tests_status", {})
+            def sets(key: str) -> tuple[set, set]:
+                block = their_status.get(key, {})
+                return set(block.get("success", [])), set(block.get("failure", []))
+
+            t_f2p_ok, t_f2p_bad = sets("FAIL_TO_PASS")
+            t_p2p_ok, t_p2p_bad = sets("PASS_TO_PASS")
+            agree = (
+                ours.resolved == theirs.get("resolved")
+                and set(ours.f2p_success) == t_f2p_ok
+                and set(ours.f2p_failure) == t_f2p_bad
+                and set(ours.p2p_success) == t_p2p_ok
+                and set(ours.p2p_failure) == t_p2p_bad
+            )
+            print(f"   {inst.instance_id:26} {strategy:11} "
+                  f"{ours.summary():34} "
+                  f"{('resolved' if theirs.get('resolved') else 'unresolved'):11} "
+                  f"{'yes' if agree else 'NO'}")
+            if not agree:
+                disagreements.append(
+                    f"{inst.instance_id}/{strategy}: ours resolved="
+                    f"{ours.resolved} f2p_ok={sorted(ours.f2p_success)} "
+                    f"p2p_bad={sorted(ours.p2p_failure)}; upstream resolved="
+                    f"{theirs.get('resolved')} f2p_ok={sorted(t_f2p_ok)} "
+                    f"p2p_bad={sorted(t_p2p_bad)}"
+                )
+            expected = EXPECTED[strategy]
+            if not ours.summary().startswith(expected.split(" ")[0]):
+                wrong_outcome.append(
+                    f"{inst.instance_id}/{strategy}: expected {expected!r}, "
+                    f"got {ours.summary()!r}")
+
+    print(f"\n{checked - len(disagreements)}/{checked} agreed on the full "
+          f"FAIL_TO_PASS and PASS_TO_PASS breakdown")
+    for label, problems in (("DISAGREEMENTS", disagreements),
+                            ("UNEXPECTED OUTCOMES", wrong_outcome)):
+        if problems:
+            print(f"\n{label}", file=sys.stderr)
+            for p in problems:
+                print(f"  {p}", file=sys.stderr)
+    if disagreements or wrong_outcome:
+        return 1
+    print("\nCONFORMANT — our resolver matches the real SWE-bench grader on every")
+    print("branch of the rule: resolved, unresolved, regressed, and patch-apply "
+          "failure.")
+    return 0
+
+
 def _cmd_conform(args: argparse.Namespace) -> int:
     """Grade the same submissions with our grader and the real one, and compare.
 
@@ -999,6 +1081,14 @@ def build_parser() -> argparse.ArgumentParser:
                          "is the right bar")
     cf.add_argument("--time-cap", type=float, default=300.0)
     cf.set_defaults(func=_cmd_conform)
+
+    sw = sub.add_parser(
+        "swe-conform",
+        help="check our SWE-bench resolver against the real swebench grader")
+    sw.add_argument("--out", default="swe-conform")
+    sw.add_argument("--strategy", action="append",
+                    help="repeatable; defaults to every reference agent")
+    sw.set_defaults(func=_cmd_swe_conform)
 
     sk = sub.add_parser("skills", help="profile which ML competences an agent has")
     sk.add_argument("--out", default="skills")
