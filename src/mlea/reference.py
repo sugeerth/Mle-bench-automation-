@@ -25,8 +25,13 @@ import csv
 from collections import defaultdict
 from functools import lru_cache
 from pathlib import Path
+from typing import Sequence
 
 DATA_PATH = Path(__file__).parent / "data" / "mlebench_per_competition_medals.csv"
+#: Upstream's complexity tiers (``experiments/splits/{low,medium,high}.txt``),
+#: defined by how long an experienced ML engineer would need: under 2 hours,
+#: 2-10 hours, over 10 hours. The low tier *is* MLE-bench Lite.
+COMPLEXITY_PATH = Path(__file__).parent / "data" / "mlebench_complexity.csv"
 
 #: The 22 low-complexity competitions (upstream ``experiments/splits/low.txt``).
 LITE_COMPETITIONS: frozenset[str] = frozenset({
@@ -109,6 +114,57 @@ def reference_rates(
     return tuple(k / s for k, s in rows.values())
 
 
+
+@lru_cache(maxsize=1)
+def complexity() -> dict[str, str]:
+    """Competition id -> upstream complexity tier."""
+    with COMPLEXITY_PATH.open() as fh:
+        return {r["competition_id"]: r["complexity"] for r in csv.DictReader(fh)}
+
+
+def complete_experiments(n_competitions: int = 75) -> list[str]:
+    """Experiments that reported every competition.
+
+    An experiment missing competitions cannot go in a shared matrix without
+    imputing the gaps, and imputing a medal rate is inventing a result. Several
+    published runs cover only a subset (``pievolve`` reports 53 of 75), so the
+    matrix is built from the complete ones and the rest are named, not dropped
+    silently.
+    """
+    return sorted(e for e, d in _load().items() if len(d) == n_competitions)
+
+
+def matrix(
+    *,
+    competitions: frozenset[str] | None = None,
+    experiments_: Sequence[str] | None = None,
+):
+    """The published results as a subject-by-item matrix.
+
+    Returns ``(rates, seeds, experiment_names, competition_ids)`` where
+    ``rates[i][j]`` is experiment ``i``'s medal rate on competition ``j`` and
+    ``seeds[i][j]`` is how many runs that rate was measured over. This is the
+    input :mod:`mlea.instrument` needs to treat MLE-bench as an instrument and
+    ask what it can and cannot resolve.
+    """
+    table = _load()
+    names = list(experiments_) if experiments_ is not None else complete_experiments()
+    missing = [e for e in names if e not in table]
+    if missing:
+        raise UnknownExperiment(f"not in the shipped data: {', '.join(sorted(missing))}")
+    if not names:
+        raise UnknownExperiment("no experiments selected")
+    common = set.intersection(*(set(table[e]) for e in names))
+    if competitions is not None:
+        common &= set(competitions)
+    comps = sorted(common)
+    if not comps:
+        raise UnknownExperiment("the selected experiments share no competitions")
+    rates = [[table[e][c][0] / table[e][c][1] for c in comps] for e in names]
+    seeds = [[table[e][c][1] for c in comps] for e in names]
+    return rates, seeds, names, comps
+
+
 def summarise(experiment: str, *, competitions: frozenset[str] | None = None) -> dict:
     """Shape of a reference pool: mean, and how much sits at the extremes."""
     rates = reference_rates(experiment, competitions=competitions)
@@ -122,11 +178,15 @@ def summarise(experiment: str, *, competitions: frozenset[str] | None = None) ->
 
 
 __all__ = [
+    "COMPLEXITY_PATH",
     "DATA_PATH",
     "LITE_COMPETITIONS",
     "REFERENCE_EXPERIMENTS",
     "UnknownExperiment",
+    "complete_experiments",
+    "complexity",
     "experiments",
+    "matrix",
     "reference_rates",
     "summarise",
 ]

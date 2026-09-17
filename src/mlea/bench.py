@@ -98,12 +98,50 @@ class CompetitionSpec:
     upstream_id: str | None = None
     #: Inclusive bounds the grader enforces on the target, if any.
     target_range: tuple[float, float] | None = None
+    #: How much of the target lies outside any polynomial-plus-tanh basis, in
+    #: [0, 1]. This is the knob that creates *headroom*.
+    #:
+    #: The original latent function is a linear term, one pairwise interaction
+    #: and one tanh -- all of which the highest-capacity model in the simulated
+    #: field represents exactly. So the field reaches the oracle, the whole
+    #: leaderboard compresses into a band a couple of AUC-thousandths wide, and
+    #: there is nothing left to be good at. :mod:`mlea.instrument` reported this
+    #: as a suite that could not order its own reference ladder.
+    #:
+    #: Above 0 the target gains random ridge functions -- sinusoids, cusps,
+    #: bumps, cubics along random directions -- which no fixed low-order basis
+    #: captures. Capacity and tuning then buy real score, which is the condition
+    #: for a competition to separate agents at all. Directions are drawn at
+    #: random, so the signal does not live in fixed columns and the generator
+    #: stays permutation-equivariant.
+    #:
+    #: Defaults to 0 so that competitions generated before this existed still
+    #: generate byte-identically.
+    latent_complexity: float = 0.0
+    #: How strong the simulated field is, in [0, 1]. This is the knob that
+    #: decides whether the competition can *discriminate*.
+    #:
+    #: At 0 every team draws its regularisation blind, so the top of the
+    #: leaderboard is a lucky draw rather than a good model, and any competent
+    #: agent lands above the 90th percentile. Percentile is then at ceiling and
+    #: the competition separates nobody -- which is what :mod:`mlea.instrument`
+    #: reported about this package's own default suite. At 1 every team selects
+    #: its capacity and penalty on a holdout, the way a real leaderboard's upper
+    #: half does, and an agent has to actually be good to place.
+    #:
+    #: Defaults to 0 so that competitions generated before this existed still
+    #: generate byte-identically; the discriminating suite sets it explicitly.
+    field_strength: float = 0.0
 
     def __post_init__(self) -> None:
         if self.task not in TASKS:
             raise ValueError(f"task must be one of {sorted(TASKS)}")
         if not 0.0 <= self.difficulty <= 1.0:
             raise ValueError("difficulty must be in [0, 1]")
+        if not 0.0 <= self.field_strength <= 1.0:
+            raise ValueError("field_strength must be in [0, 1]")
+        if not 0.0 <= self.latent_complexity <= 1.0:
+            raise ValueError("latent_complexity must be in [0, 1]")
         if self.n_teams < 1:
             raise ValueError("n_teams must be >= 1")
         unknown = set(self.challenges) - set(CHALLENGES)
@@ -130,7 +168,9 @@ class CompetitionSpec:
         return TASKS[self.task]
 
 
-def _latent(X: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def _latent(
+    X: np.ndarray, rng: np.random.Generator, complexity: float = 0.0
+) -> np.ndarray:
     """A non-trivial signal: linear terms, an interaction, and a nonlinearity.
 
     Purely linear targets make ridge an oracle and collapse the leaderboard, so
@@ -150,7 +190,46 @@ def _latent(X: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     i, j, k = rng.choice(n_features, size=3, replace=n_features < 3)
     interaction = 1.5 * X[:, i] * X[:, j]
     nonlinear = 1.2 * np.tanh(2.0 * X[:, k])
-    return linear + interaction + nonlinear
+    out = linear + interaction + nonlinear
+    if complexity > 0:
+        out = out + _ridge_functions(X, rng, complexity)
+    return out
+
+
+#: Nonlinearities used to build the out-of-basis part of a latent function.
+#: Each is badly approximated by low-order polynomials over the relevant range,
+#: which is the entire point: they are what a higher-capacity or better-tuned
+#: model can buy and a lazy one cannot.
+_RIDGE_SHAPES = (
+    lambda z: np.sin(2.5 * z),
+    lambda z: np.abs(z) - 0.8,
+    lambda z: np.exp(-2.0 * z**2),
+    lambda z: np.clip(z, -0.5, 0.5) * 3.0,
+    lambda z: z**3 / 3.0,
+)
+
+
+def _ridge_functions(
+    X: np.ndarray, rng: np.random.Generator, complexity: float
+) -> np.ndarray:
+    """A sum of nonlinear functions of random linear projections of ``X``.
+
+    This is the classic random-feature construction, used here for the opposite
+    of its usual purpose: not to *approximate* a function cheaply but to build
+    one that a fixed low-order basis cannot approximate, so that model capacity
+    and tuning have something to buy.
+    """
+    n_terms = int(round(2 + 10 * complexity))
+    total = np.zeros(X.shape[0])
+    for _ in range(n_terms):
+        w = rng.normal(0, 1, size=X.shape[1])
+        w /= np.linalg.norm(w) + 1e-12
+        shape = _RIDGE_SHAPES[int(rng.integers(len(_RIDGE_SHAPES)))]
+        total += float(rng.normal(0, 1)) * shape(X @ w * rng.uniform(0.8, 2.0))
+    # Scaled so ``complexity`` controls the share of the target living outside
+    # the basis, rather than merely the number of terms.
+    sd = total.std()
+    return (2.5 * complexity) * total / (sd + 1e-12)
 
 
 def _ridge(X: np.ndarray, y: np.ndarray, alpha: float) -> np.ndarray:
@@ -211,26 +290,49 @@ def _simulate_leaderboard(
     metric_name: str,
     n_teams: int,
     rng: np.random.Generator,
+    strength: float = 0.0,
 ) -> list[float]:
     """Score a field of real fitted models on the real test split.
 
     Each team gets a capacity, a regularisation strength and a bootstrap
     resample of the training data, so the spread is genuine model-quality
     variation rather than noise added to an oracle.
+
+    ``strength`` is the fraction of the field that *selects* its capacity and
+    penalty on a holdout instead of drawing them blind. It is the difference
+    between a field of random models and a field of people who are trying. A
+    leaderboard of the former is beaten above the 90th percentile by anything
+    that fits a model at all, which makes percentile useless as a score.
     """
     metric = get_metric(metric_name)
     n = X_train.shape[0]
+    cut = max(int(n * 0.75), 10)
     scores: list[float] = []
     for _ in range(n_teams):
-        capacity = int(rng.choice([1, 1, 2, 2, 3, 3, 4], size=1)[0])
-        alpha = float(10 ** rng.uniform(-2, 2.5))
         frac = float(rng.uniform(0.25, 1.0))
         idx = rng.integers(0, n, size=max(int(n * frac), 20))
-        A = _design(X_train[idx], capacity)
-        beta = _ridge(A, y_train[idx], alpha)
-        pred = _design(X_test, capacity) @ beta
+        Xi, yi = X_train[idx], y_train[idx]
+        tunes = float(rng.random()) < strength
+        if tunes:
+            # Holdout selection over the same grid a competent entrant would try.
+            best, capacity, alpha = -np.inf, 1, 1.0
+            for cap in (1, 2, 3, 4):
+                for a in (0.03, 0.3, 3.0, 30.0):
+                    try:
+                        beta = _ridge(_design(Xi[:cut], cap), yi[:cut], a)
+                        pred = _design(Xi[cut:], cap) @ beta
+                        s = metric(yi[cut:], pred)
+                    except Exception:
+                        continue
+                    s = s if metric.greater_is_better else -s
+                    if s > best:
+                        best, capacity, alpha = s, cap, a
+        else:
+            capacity = int(rng.choice([1, 1, 2, 2, 3, 3, 4], size=1)[0])
+            alpha = float(10 ** rng.uniform(-2, 2.5))
         try:
-            scores.append(metric(y_test, pred))
+            beta = _ridge(_design(Xi, capacity), yi, alpha)
+            scores.append(metric(y_test, _design(X_test, capacity) @ beta))
         except Exception:
             continue  # a degenerate fit is a team that scored nothing
     if not scores:
@@ -319,7 +421,7 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
 
     n_total = spec.n_train + spec.n_test
     X = rng.normal(0, 1, size=(n_total, spec.n_features))
-    signal = _latent(X, rng)
+    signal = _latent(X, rng, spec.latent_complexity)
     signal = (signal - signal.mean()) / (signal.std() + 1e-12)
     # difficulty 0 -> all signal; difficulty 1 -> all noise.
     noise_sd = np.tan(np.clip(spec.difficulty, 0.0, 0.98) * np.pi / 2)
@@ -443,7 +545,8 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
     lb_train = _sanitise(X_train)
     lb_test = _sanitise(X_test)
     leaderboard = _simulate_leaderboard(
-        lb_train, y_train, lb_test, y_test, spec.metric, spec.n_teams, rng
+        lb_train, y_train, lb_test, y_test, spec.metric, spec.n_teams, rng,
+        strength=spec.field_strength,
     )
     thresholds = thresholds_from_leaderboard(
         leaderboard, get_metric(spec.metric).greater_is_better
@@ -463,6 +566,8 @@ def make_competition(spec: CompetitionSpec, root: str | Path) -> Path:
                 "id_column": id_column,
                 "target_column": target_column,
                 "difficulty": spec.difficulty,
+                "latent_complexity": spec.latent_complexity,
+                "field_strength": spec.field_strength,
                 "seed": spec.seed,
                 "challenges": sorted(spec.challenges),
                 "upstream_id": spec.upstream_id,
@@ -654,12 +759,66 @@ SUITE: tuple[CompetitionSpec, ...] = (
 )
 
 
+#: A suite built to *discriminate*, rather than to exercise the plumbing.
+#:
+#: :data:`SUITE` was designed to cover task types and metric directions, and
+#: :mod:`mlea.instrument` reported what that cost: every competent agent landed
+#: above the 70th percentile, and the suite could not order its own reference
+#: ladder. Three things fix that, and all three came out of the item analysis:
+#:
+#: * ``latent_complexity`` puts most of the target outside the basis the field
+#:   fits, so there is headroom between a median entry and the oracle -- the
+#:   difference between 0.019 and 0.070 AUC on the competition this was measured
+#:   on. Without headroom, percentile is noise.
+#: * ``field_strength`` makes the top of the leaderboard a tuned model rather
+#:   than a lucky draw, so beating it means something.
+#: * The challenges make the competence ladder separable at all. On clean data
+#:   ``naive`` and ``linear`` fit the identical model, as do ``careful`` and
+#:   ``expert``; six named agents are three distinct ones until a pathology is
+#:   present for them to differ on.
+DISCRIMINATING_SUITE: tuple[CompetitionSpec, ...] = tuple(
+    CompetitionSpec(
+        f"disc-{task}-{name}",
+        task,
+        difficulty=diff,
+        n_teams=250,
+        seed=200 + k,
+        latent_complexity=0.8,
+        field_strength=0.8,
+        challenges=frozenset(ch),
+    )
+    for k, (task, name, diff, ch) in enumerate(
+        (t, n, d, c)
+        for t in ("binary", "regression")
+        for n, d, c in (
+            ("clean-easy", 0.3, ()),
+            ("clean-hard", 0.7, ()),
+            ("leakage", 0.5, ("leakage",)),
+            ("outliers", 0.5, ("outliers",)),
+            ("missing", 0.5, ("missing",)),
+            ("shift", 0.5, ("shift",)),
+        )
+        # Two combinations are left out, and the reason is mechanical rather
+        # than a correlation that came out the wrong way. Under `leakage` and
+        # `shift` with a squared-error metric, the constant train mean scores at
+        # the *top* of the leaderboard: extrapolating a linear fit through
+        # shifted features, or through a feature that is noise at test time,
+        # loses to declining to model at all. An item a constant predictor wins
+        # cannot rank modelling ability -- measured discrimination on the
+        # reference ladder is -0.92 and -0.27 -- so both are kept as skill
+        # diagnostics (see :mod:`mlea.skills`) and kept out of a score.
+        if not (t == "regression" and n in ("leakage", "shift"))
+    )
+)
+
+
 def make_suite(root: str | Path, specs: tuple[CompetitionSpec, ...] = SUITE) -> list[Path]:
     return [make_competition(s, root) for s in specs]
 
 
 __all__ = [
     "CHALLENGES",
+    "DISCRIMINATING_SUITE",
     "from_upstream",
     "CLONE_TRANSFORMS",
     "CompetitionSpec",

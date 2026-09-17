@@ -1090,6 +1090,41 @@ def build_parser() -> argparse.ArgumentParser:
                     help="repeatable; defaults to every reference agent")
     sw.set_defaults(func=_cmd_swe_conform)
 
+    ins = sub.add_parser(
+        "instrument",
+        help="measure the benchmark itself: what can it actually resolve?")
+    ins.add_argument("--source", choices=("mlebench", "suite"), default="mlebench",
+                     help="published MLE-bench results, or this package's own "
+                          "generated suite run against the reference ladder")
+    ins.add_argument("--matrix", help="analyse an arbitrary subject-by-item CSV "
+                                      "instead (first column: subject id)")
+    ins.add_argument("--split", choices=("all", "lite", "live"), default="all",
+                     help="all 75, the 22-competition lite split, or only the "
+                          "competitions some agent has ever solved")
+    ins.add_argument("--band", nargs=2, type=float, default=(0.0, 1.0),
+                     metavar=("LO", "HI"),
+                     help="restrict to agents in this ability band; reliability "
+                          "is a property of the population, not the suite alone")
+    ins.add_argument("--top", type=int,
+                     help="restrict to the N strongest agents (the frontier case)")
+    ins.add_argument("--frontier", action="store_true",
+                     help="cost-vs-fidelity curve, and where lite sits on it")
+    ins.add_argument("--target-reliability", type=float, default=0.90)
+    ins.add_argument("--show", type=int, default=8,
+                     help="items to print at each end")
+    ins.add_argument("--splits", type=int, default=40,
+                     help="agent splits for held-out fidelity")
+    ins.add_argument("--seed", type=int, default=0)
+    ins.add_argument("--out", default="instrument", help="--source suite only")
+    ins.add_argument("--agent", action="append", help="--source suite only")
+    ins.add_argument("--suite", choices=("discriminating", "legacy"),
+                     default="discriminating",
+                     help="--source suite only: which generated suite to measure")
+    ins.add_argument("--n-train", type=int, default=1500)
+    ins.add_argument("--n-test", type=int, default=600)
+    ins.add_argument("--time-cap", type=float, default=300.0)
+    ins.set_defaults(func=_cmd_instrument)
+
     sk = sub.add_parser("skills", help="profile which ML competences an agent has")
     sk.add_argument("--out", default="skills")
     sk.add_argument("--challenge", action="append",
@@ -1137,6 +1172,209 @@ def build_parser() -> argparse.ArgumentParser:
     s.set_defaults(func=_cmd_seeds)
 
     return p
+
+
+# --- instrument: measure the benchmark rather than the agent ----------------
+
+#: The reference agents that form a *strict* competence ladder, in order.
+#:
+#: Only these four are ordered by construction -- ``mlea.baseline`` builds each
+#: rung by adding one competence to the one below. ``linear`` and ``tuned`` are
+#: deliberately off the ladder: ``linear`` fits the identical model to ``naive``
+#: on clean data, and ``tuned`` searches capacity and penalty while skipping
+#: data hygiene, so it is not above ``careful`` -- it is elsewhere. Including
+#: them in a "known-true" order would be asserting an ordering that does not
+#: exist, and would make a suite look wrong for getting it right.
+LADDER = ("constant", "naive", "careful", "expert")
+
+#: Run alongside the ladder, reported, and excluded from the ordering check.
+OFF_LADDER = ("linear", "tuned")
+
+
+def _instrument_matrix_from_csv(path: Path):
+    """Read a subject-by-item matrix: first column subject id, rest items."""
+    import csv as _csv
+
+    with Path(path).open(newline="") as fh:
+        rows = list(_csv.reader(fh))
+    if len(rows) < 3:
+        raise SystemExit(f"{path}: need a header and at least 2 subject rows")
+    items = [c.strip() for c in rows[0][1:]]
+    subjects = [r[0] for r in rows[1:]]
+    M = np.array([[float(v) for v in r[1:]] for r in rows[1:]], dtype=float)
+    return M, items, subjects
+
+
+def _print_instrument(rep, *, show: int) -> None:
+    print(rep.summary())
+    ranked = sorted(rep.items, key=lambda i: i.discrimination)
+    def line(i):
+        adj = ("     -" if i.discrimination_disattenuated is None
+               else f"{i.discrimination_disattenuated:+.3f}")
+        tier = i.complexity or "-"
+        return (f"   {i.discrimination:+.3f}  {adj}  mean={i.mean:.3f} "
+                f"sd={i.sd:.3f}  {tier:6} {i.item}")
+    print(f"\n{'':3}{'disc':>6}  {'adj':>6}  per item (worst first)")
+    for i in ranked[:show]:
+        print(line(i))
+    if len(ranked) > 2 * show:
+        print(f"   ... {len(ranked) - 2 * show} more ...")
+    for i in ranked[-show:]:
+        print(line(i))
+
+
+def _cmd_instrument(args: argparse.Namespace) -> int:
+    """Ask what a benchmark can resolve, and what its dead weight costs.
+
+    Every other command in this package measures an agent. This one measures the
+    measuring device: how much of the ability spread a benchmark reports is real,
+    how many ability levels it can actually separate, which competitions carry no
+    information at all, and what a cheaper suite would cost in ranking fidelity.
+    """
+    from . import instrument as inst
+    from . import reference
+
+    rng = np.random.default_rng(args.seed)
+    trials = None
+    complexity = None
+
+    if args.matrix:
+        M, items, subjects = _instrument_matrix_from_csv(args.matrix)
+    elif args.source == "suite":
+        M, items, subjects = _instrument_suite(args)
+        if M is None:
+            return 2
+    else:
+        rates, seeds, subjects, items = reference.matrix()
+        M, trials = np.array(rates), np.array(seeds)
+        complexity = reference.complexity()
+        keep = list(range(len(items)))
+        if args.split == "lite":
+            keep = [j for j, c in enumerate(items) if c in reference.LITE_COMPETITIONS]
+        elif args.split == "live":
+            keep = [j for j in keep if M[:, j].std() > 0]
+        ability = M.mean(axis=1)
+        rows = [
+            i for i in range(len(subjects))
+            if args.band[0] <= ability[i] <= args.band[1]
+        ]
+        if args.top:
+            rows = sorted(rows, key=lambda i: -ability[i])[: args.top]
+            rows.sort()
+        if len(rows) < 2:
+            print("error: fewer than 2 agents in the requested ability band",
+                  file=sys.stderr)
+            return 2
+        M = M[np.ix_(rows, keep)]
+        trials = trials[np.ix_(rows, keep)]
+        subjects = [subjects[i] for i in rows]
+        items = [items[j] for j in keep]
+
+    rep = inst.analyse(M, items, subjects, trials=trials,
+                       complexity=complexity, rng=rng)
+    _print_instrument(rep, show=args.show)
+
+    if args.source == "suite" and not args.matrix:
+        # A generated suite is the one case with a *known* true ordering: the
+        # reference ladder is built so that each rung strictly adds a competence.
+        # Recovering it is the concrete thing a suite either does or does not do,
+        # and it is the check reliability alone cannot give -- a suite can be
+        # perfectly self-consistent about an ordering that is simply wrong.
+        known = [s for s in LADDER if s in subjects]
+        if len(known) >= 3:
+            truth = [LADDER.index(s) for s in known]
+            measured = [rep.ability[subjects.index(s)] for s in known]
+            tau = inst.kendall_tau_b(measured, truth)
+            print(f"\nladder recovery: tau-b {tau:+.3f} against the order the "
+                  f"reference agents are built in")
+            print("   " + "  ".join(
+                f"{s}={rep.ability[subjects.index(s)]:.3f}" for s in known))
+            off = [s for s in OFF_LADDER if s in subjects]
+            if off:
+                print("   off-ladder (no true order asserted): " + "  ".join(
+                    f"{s}={rep.ability[subjects.index(s)]:.3f}" for s in off))
+            if tau < 0.5:
+                print("   this suite does not recover a known-true ordering; "
+                      "its reliability is measuring agreement, not correctness")
+
+    target = args.target_reliability
+    need = rep.items_needed(target)
+    if need is None:
+        print(f"\nreliability {target:.2f} is unreachable: these items share no signal")
+    elif need <= rep.n_items:
+        print(f"\nreliability {target:.2f} is already met with {rep.n_items} items")
+    else:
+        print(f"\nreliability {target:.2f} would need ~{need} items of this quality "
+              f"({need - rep.n_items} more)")
+
+    if args.frontier:
+        if complexity is None:
+            print("\nerror: --frontier needs complexity tiers, which only the "
+                  "published MLE-bench source carries", file=sys.stderr)
+            return 2
+        costs = [inst.COMPLEXITY_COST[complexity[c]] for c in items]
+        total = sum(costs)
+        budgets = [round(total * f) for f in (0.05, 0.1, 0.2, 0.3, 0.5, 0.75)]
+        print(f"\ncost-fidelity frontier (total cost {total:.0f}; "
+              f"tau-b vs the full suite, on agents the selection never saw)")
+        print(f"   {'budget':>8} {'share':>6} {'items':>6}  held-out tau-b")
+        for budget, n, tau, sd in inst.cost_frontier(
+            M, costs, budgets, rng=rng, n_splits=args.splits
+        ):
+            print(f"   {budget:8.0f} {budget/total:6.0%} {n:6d}  {tau:.3f} +- {sd:.3f}")
+        lite = [j for j, c in enumerate(items) if c in reference.LITE_COMPETITIONS]
+        if len(lite) >= 2:
+            lite_cost = sum(costs[j] for j in lite)
+            est = inst.cross_validated_fidelity(
+                M, lambda tr: lite, n_splits=args.splits, rng=rng)
+            rnd = np.random.default_rng(args.seed + 1)
+            est_rand = inst.cross_validated_fidelity(
+                M,
+                lambda tr, k=len(lite): list(rnd.choice(M.shape[1], k, replace=False)),
+                n_splits=args.splits, rng=rng,
+            )
+            print(f"\n   MLE-bench Lite ({len(lite)} items, cost {lite_cost:.0f}): "
+                  f"{est}")
+            print(f"   a random {len(lite)} of the same suite:          {est_rand}")
+    return 0
+
+
+def _instrument_suite(args: argparse.Namespace):
+    """Run the reference ladder over a generated suite and return its matrix.
+
+    Scores are converted to **leaderboard percentile**, not raw metric values: an
+    AUC and an RMSE cannot be averaged, and percentile is the unit the rest of
+    this package already uses to compare across competitions.
+    """
+    from .bench import DISCRIMINATING_SUITE, SUITE, make_competition
+
+    out = Path(args.out)
+    data = out / "data"
+    base = SUITE if args.suite == "legacy" else DISCRIMINATING_SUITE
+    specs = [replace(s, n_train=args.n_train, n_test=args.n_test) for s in base]
+    agents = args.agent or list(LADDER) + list(OFF_LADDER)
+    print(f"running {len(agents)} agents over {len(specs)} generated competitions")
+    M = np.zeros((len(agents), len(specs)))
+    for j, spec in enumerate(specs):
+        comp = make_competition(spec, data)
+        for i, agent in enumerate(agents):
+            sub = comp / f"sub-{agent}.csv"
+            env = dict(os.environ, DATA_DIR=str(comp / "prepared" / "public"),
+                       SUBMISSION_PATH=str(sub))
+            subprocess.run(
+                [sys.executable, "-m", "mlea.baseline", "--strategy", agent],
+                env=env, capture_output=True, text=True, timeout=args.time_cap,
+            )
+            report = grade_submission(sub, comp)
+            pct = (0.0 if report.score is None
+                   else leaderboard_percentile(
+                       report.score,
+                       json.loads((comp / "leaderboard.json").read_text()),
+                       get_metric(spec.metric).greater_is_better))
+            M[i, j] = pct
+        print(f"   {spec.id:28} " +
+              " ".join(f"{a[:4]}={M[i, j]:.2f}" for i, a in enumerate(agents)))
+    return M, [s.id for s in specs], agents
 
 
 def main(argv: list[str] | None = None) -> int:

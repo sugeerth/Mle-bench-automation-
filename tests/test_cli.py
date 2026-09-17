@@ -391,3 +391,54 @@ def test_bench_cli_reports_thresholds(tmp_path, capsys):
     assert main(["bench", "--out", str(tmp_path / "d"), "--count", "2"]) == 0
     out = capsys.readouterr().out
     assert "oracle=" in out and "gold=" in out
+
+
+def test_instrument_reports_the_published_benchmark(capsys):
+    assert main(["instrument", "--show", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "75 items x 25 agents" in out
+    assert "distinguishable levels" in out
+    assert "independent items would reach" in out
+    assert "dead items" in out
+
+
+def test_instrument_narrows_to_an_ability_band(capsys):
+    assert main(["instrument", "--split", "lite", "--top", "8", "--show", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "22 items x 8 agents" in out
+    # More than half of lite is dead among the strongest agents. If this ever
+    # stops being true the benchmark has changed, not the code.
+    assert "dead items            12" in out
+
+
+def test_instrument_rejects_an_empty_ability_band(capsys):
+    assert main(["instrument", "--band", "0.99", "1.0"]) == 2
+    assert "fewer than 2 agents" in capsys.readouterr().err
+
+
+def test_instrument_reads_an_arbitrary_matrix(tmp_path, capsys):
+    csv = tmp_path / "m.csv"
+    csv.write_text(
+        "agent,i1,i2,i3,i4\n"
+        "a,0.1,0.2,0.1,0.2\n"
+        "b,0.5,0.6,0.5,0.6\n"
+        "c,0.9,0.8,0.9,0.8\n"
+    )
+    assert main(["instrument", "--matrix", str(csv), "--show", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "4 items x 3 agents" in out
+
+
+def test_instrument_rejects_a_matrix_with_nothing_to_compare(tmp_path):
+    csv = tmp_path / "m.csv"
+    csv.write_text("agent,i1,i2\na,0.1,0.2\n")
+    with pytest.raises(SystemExit):
+        main(["instrument", "--matrix", str(csv)])
+
+
+def test_instrument_frontier_places_lite_on_the_cost_curve(capsys):
+    assert main(["instrument", "--frontier", "--splits", "6", "--show", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "cost-fidelity frontier" in out
+    assert "MLE-bench Lite" in out
+    assert "a random 22 of the same suite" in out

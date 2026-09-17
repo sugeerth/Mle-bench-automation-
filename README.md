@@ -6,7 +6,9 @@ Evaluation infrastructure for agent benchmarks — [MLE-bench](https://github.co
 repeatably, cheaply, and as a regression signal rather than a one-off leaderboard stunt.
 
 Both graders are **verified against the real upstream graders**: 48/48 exact on 12 real
-MLE-bench competitions, 15/15 on the full SWE-bench resolution breakdown.
+MLE-bench competitions, 15/15 on the full SWE-bench resolution breakdown. And the benchmarks
+themselves are measured, not assumed: `mlea instrument` finds that 29 of MLE-bench's 75
+competitions carry zero information about the eight strongest published agents.
 
 ## `mlea` — a working eval pipeline
 
@@ -145,6 +147,56 @@ mlea power --design lite-regression
 
 # 5. look at it — every agent at once
 mlea dashboard runs/nightly -o dashboard.html
+```
+
+### `mlea instrument` — measuring the benchmark instead of the agent
+
+Everything else here asks how good an agent is. This asks whether the benchmark can tell.
+
+An agent-by-competition score matrix is a respondent-by-item matrix, so a century of test
+theory applies unchanged: item discrimination, reliability with a **null band**, and Wright
+separation — reliability restated as *how many ability levels the thing can actually resolve*.
+Run on 25 published MLE-bench experiments that reported all 75 competitions:
+
+```
+75 items x 25 agents, ability 0.012-0.778
+reliability (alpha)   0.983   (independent items would reach 0.340 at this size)
+distinguishable levels  10.4
+dead items            11, 19% of suite cost
+```
+
+MLE-bench is a genuinely good instrument — and it is eroding from both ends. Restricted to the
+**eight strongest agents**, the comparison anyone actually runs today:
+
+- **29 of 75 competitions carry zero information** about them — 18 because all eight medal
+  every time, 11 because no published agent ever has. That is 37% of the suite's cost.
+- **MLE-bench Lite is more than half dead at the frontier:** 12 of its 22 competitions cannot
+  separate any of the eight, leaving 2.9 resolvable ability levels behind numbers that get
+  reported to three decimals.
+- **20% of the budget buys 0.975 tau-b** against the full-75 ranking, held out on agents the
+  subset selection never saw. Lite itself is well chosen *for its budget* — an
+  information-optimal subset at the same cost gains 0.012 tau — but it is no better than a
+  random 22 at the same item count.
+
+Then pointed at this repository's own generated suite, where it found three defects:
+
+```
+before:  alpha 0.990   levels 13.9   ladder recovery tau-b +0.183
+after:   alpha 0.856   levels  3.6   ladder recovery tau-b +1.000
+```
+
+Reliability went **down**, and that is the fix. The old suite agreed with itself perfectly about
+an ordering that was wrong — it ranked `naive` above `careful` — because the latent function was
+inside the basis the simulated field fits, so the whole leaderboard sat at the oracle and
+percentile was noise. Headroom went from 0.019 to 0.070 AUC; the rebuilt suite recovers the
+known competence ladder exactly. Full write-up and method:
+[`docs/BENCHMARK-QUALITY.md`](docs/BENCHMARK-QUALITY.md).
+
+```bash
+mlea instrument                       # the published benchmark
+mlea instrument --split lite --top 8  # lite, where it is actually used
+mlea instrument --frontier            # cost-fidelity curve, and lite on it
+mlea instrument --matrix scores.csv   # any subject-by-item matrix
 ```
 
 ### `mlea probe` — a contamination probe that is known to work
@@ -296,6 +348,7 @@ Everything else here is **planning documents**.
 | [`docs/PROPOSAL-anytime-eval.md`](docs/PROPOSAL-anytime-eval.md) | Demoted — anytime checkpointing, kept as cheap triage instrumentation |
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
+| [`docs/BENCHMARK-QUALITY.md`](docs/BENCHMARK-QUALITY.md) | Measuring the benchmark itself: what MLE-bench can resolve, what its dead weight costs, and the three defects this found in our own suite |
 | [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) | Checked against 12 **real** MLE-bench competitions and their own graders — 48/48 exact |
 | [`docs/SWE-BENCH.md`](docs/SWE-BENCH.md) | The same treatment for SWE-bench — 15/15 against the real grader, and the bug it found |
 | [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
@@ -338,6 +391,7 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] Power model grounded in real published run data
 - [x] Log signatures and agent contracts verified against primary sources
 - [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
+- [x] `mlea instrument` — psychometrics of the benchmark itself, and the suite rebuild it forced
 - [x] `mlea probe` — contamination probe with a working positive control
 - [x] `mlea dashboard` — comparative UI across every agent
 - [x] `mlea skills` — skill profiling against matched clean controls

@@ -16,7 +16,21 @@ from .records import (
     RunSet,
     assert_comparable,
 )
-from .bench import SUITE, CompetitionSpec, make_competition, make_suite
+from .bench import (
+    DISCRIMINATING_SUITE,
+    SUITE,
+    CompetitionSpec,
+    make_competition,
+    make_suite,
+)
+from .instrument import (
+    InstrumentReport,
+    ItemStats,
+    analyse,
+    cronbach_alpha,
+    kendall_tau_b,
+    null_reliability,
+)
 from .grade import GradingReport, grade_submission, medal_ranks
 from .harness import (
     CommandAgent,
@@ -49,6 +63,9 @@ __all__ = [
     "InvalidSubmission",
     "METRICS",
     "SUITE",
+    "DISCRIMINATING_SUITE",
+    "InstrumentReport",
+    "ItemStats",
     "DESIGNS",
     "Design",
     "Fingerprint",
@@ -66,10 +83,14 @@ __all__ = [
     "TriageReport",
     "TriageResult",
     "__version__",
+    "analyse",
     "assert_comparable",
     "assert_retry_allowed",
     "classify",
     "compare",
+    "cronbach_alpha",
+    "kendall_tau_b",
+    "null_reliability",
     "triage_run_group",
     "minimum_detectable_effect",
     "power_for_effect",
