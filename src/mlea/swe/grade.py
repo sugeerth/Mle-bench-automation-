@@ -16,8 +16,11 @@ resolution, and a harness that only checks the first clause will score it as one
 
 from __future__ import annotations
 
+import os
 import re
+import shutil
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -33,18 +36,59 @@ _STATUS_RE = re.compile(
 )
 
 
+
+def _drop_bytecode(repo: Path) -> None:
+    """Delete every ``__pycache__`` under the repo before running its tests.
+
+    This is not hygiene, it is correctness, and the bug it fixes is the worst
+    kind: a silently wrong answer.
+
+    CPython validates a cached ``.pyc`` against the source's **(mtime in whole
+    seconds, size in bytes)**. A patch that changes a file without changing its
+    length, applied in the same second as the previous test run, produces an
+    identical validation key -- so the interpreter reuses bytecode compiled from
+    the *pre-patch* source and the tests grade the code the patch replaced.
+
+    Found on a generated instance whose before and after were both 46 bytes: the
+    gold patch changed two return values, and the test run after it reported the
+    old ones. A correct patch would have been marked unresolved, with a test log
+    that looks entirely ordinary. The failure is also timing-dependent, so it
+    comes and goes with how fast the suite happens to run.
+
+    Upstream SWE-bench never meets this because every instance is evaluated in a
+    fresh container. A harness that drops Docker -- which is what makes this
+    package runnable anywhere -- reuses the working tree, and inherits the
+    problem Docker was incidentally solving.
+    """
+    for cache in repo.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+
+
 def run_tests(repo: str | Path, test_file: str, timeout: float = 120.0) -> str:
     """Run pytest and return a log wrapped in upstream's markers.
 
     ``-rA`` is not optional: it is what makes pytest emit the per-test
     ``PASSED``/``FAILED`` summary lines every log parser reads. Without it the
     log is unparseable and every instance grades as unresolved.
+
+    ``sys.executable``, not ``"python"``. This spawned the interpreter that
+    happens to be first on PATH, which is not necessarily the one running this
+    package: on a machine where ``python`` is an older build without pytest
+    installed, every run returned an empty log, every test looked absent, and the
+    only reason it surfaced loudly is that :func:`mlea.swe.bench.make_instance`
+    refuses to build an instance whose gold patch fixes nothing. Used directly,
+    ``run_tests`` would have reported "no tests passed" and been believed.
     """
     repo = Path(repo)
+    _drop_bytecode(repo)
     try:
         proc = subprocess.run(
-            ["python", "-m", "pytest", "-rA", "-p", "no:cacheprovider", test_file],
+            # -B: write no bytecode. Together with _drop_bytecode above, nothing
+            # cached can survive to be believed on the next run.
+            [sys.executable, "-B", "-m", "pytest", "-rA", "-p", "no:cacheprovider",
+             test_file],
             cwd=str(repo), capture_output=True, text=True, timeout=timeout,
+            env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
         )
         body, code = proc.stdout + proc.stderr, proc.returncode
     except subprocess.TimeoutExpired:

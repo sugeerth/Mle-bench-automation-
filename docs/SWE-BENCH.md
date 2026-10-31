@@ -80,6 +80,36 @@ upstream: `patch_applied` stays on the report, because upstream folds "did not a
 with different owners — the same mechanical-versus-capability distinction
 [`mlea triage`](../README.md) draws on the MLE-bench side.
 
+## The bug dropping Docker introduced
+
+Found later, by the full test suite rather than by conformance, and worse than the one above
+because it produces a silently wrong answer rather than a differently-shaped right one.
+
+CPython validates a cached `.pyc` against the source file's **(mtime in whole seconds, size in
+bytes)**. A patch that changes a file without changing its length, applied in the same second as
+the previous test run, produces an identical validation key — so the interpreter reuses bytecode
+compiled from the **pre-patch** source, and the tests grade the code the patch replaced.
+
+It showed up on a generated instance whose before and after were both exactly 46 bytes. The gold
+patch changed two return values; the test run after it reported the old ones, so the instance was
+refused by its own oracle with "the gold patch fixes nothing". On a real instance there would be
+no oracle to catch it: a correct patch would simply come back unresolved, with a test log that
+reads entirely normally.
+
+Two properties made it nasty. It is **timing-dependent** — the same test passed inside the full
+module and failed when run alone, because what matters is whether two writes land in the same
+one-second tick. And it is **invisible in the log**, which shows real test output for real code,
+just not the code under evaluation.
+
+Upstream SWE-bench never meets this, because every instance is evaluated in a **fresh container**.
+Dropping Docker is what makes this package runnable anywhere, and it inherits the problem Docker
+was incidentally solving: a reused working tree keeps state between runs. The fix is to delete
+every `__pycache__` under the repository before each run and pass `-B` so none is written, and
+both regression tests fail if either half is removed.
+
+The general lesson is worth more than the fix. Replacing an isolation mechanism means taking on
+every guarantee it was providing by accident, not only the ones it advertised.
+
 ## What this is and is not
 
 **Is:** the real resolution logic, verified. The rule, the log format, the parser, the

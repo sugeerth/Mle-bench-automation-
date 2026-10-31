@@ -215,3 +215,65 @@ def test_gold_resolves_and_noop_does_not_for_upstream_too(suite, tmp_path):
         theirs = upstream.grade_with_upstream(
             p, inst.instance_id, inst.fail_to_pass, inst.pass_to_pass)
         assert theirs["resolved"] is expected
+
+
+def test_tests_run_under_the_interpreter_that_imported_us(tmp_path, monkeypatch):
+    """Not under whatever ``python`` happens to be first on PATH.
+
+    The original code spawned ``python``, which on a machine whose ``python`` is
+    an older build without pytest installed produced an empty log for every run:
+    no test appeared to pass, so every instance graded as unresolved and every
+    generated instance was refused by its own oracle. ``sys.executable`` is an
+    absolute path, so emptying PATH is a direct test of the fix -- it passes only
+    if nothing in the call depends on PATH resolution.
+    """
+    import sys
+
+    from mlea.swe.grade import parse_pytest_statuses, run_tests
+
+    (tmp_path / "test_trivial.py").write_text("def test_ok():\n    assert True\n")
+    monkeypatch.setenv("PATH", "")
+    statuses = parse_pytest_statuses(run_tests(tmp_path, "test_trivial.py"))
+    assert any(name.endswith("test_ok") for name in statuses)
+    assert set(statuses.values()) == {"PASSED"}
+    assert sys.executable  # the absolute path that made this possible
+
+
+def test_a_length_preserving_patch_is_not_graded_against_stale_bytecode(tmp_path):
+    """A patch that changes a file without changing its length must still be seen.
+
+    CPython validates a cached ``.pyc`` against the source's (mtime in whole
+    seconds, size in bytes). Two versions of the same length written in the same
+    second share that key, so the interpreter reuses bytecode compiled from the
+    source the patch replaced -- and the tests grade the old code while the log
+    looks entirely ordinary. A correct patch comes back unresolved.
+
+    Both module bodies below are exactly 46 bytes, which is what makes this a
+    test rather than a hope.
+    """
+    before = "def f():\n    return 1\n\n\ndef g():\n    return 2\n"
+    after = "def f():\n    return 9\n\n\ndef g():\n    return 0\n"
+    assert len(before) == len(after) == 46
+
+    (tmp_path / "m.py").write_text(before)
+    (tmp_path / "test_m.py").write_text(
+        "from m import f, g\n\n\n"
+        "def test_g():\n    assert g() == 2\n\n\n"
+        "def test_f():\n    assert f() == 9\n"
+    )
+    first = parse_pytest_statuses(run_tests(tmp_path, "test_m.py"))
+    assert first["test_m.py::test_f"] == "FAILED"
+
+    # No sleep: the point is that this works within one mtime tick.
+    (tmp_path / "m.py").write_text(after)
+    second = parse_pytest_statuses(run_tests(tmp_path, "test_m.py"))
+    assert second["test_m.py::test_f"] == "PASSED"
+    assert second["test_m.py::test_g"] == "FAILED"
+
+
+def test_running_tests_leaves_no_bytecode_behind(tmp_path):
+    (tmp_path / "m.py").write_text("def f():\n    return 1\n")
+    (tmp_path / "test_m.py").write_text("from m import f\n\n\ndef test_f():\n    assert f() == 1\n")
+    assert parse_pytest_statuses(run_tests(tmp_path, "test_m.py"))
+    assert not list(tmp_path.rglob("__pycache__"))
+    assert not list(tmp_path.rglob("*.pyc"))
