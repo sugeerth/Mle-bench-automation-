@@ -456,11 +456,14 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
 - [x] `mlea instrument` — psychometrics of the benchmark itself, and the suite rebuild it forced
 - [x] `mlea irt` / `mlea anchor` — item-response model and anchor-point estimation, which overturned two of the above
+- [x] Both conformance figures re-measured from scratch on a clean container after three bug fixes:
+      **48/48** against the real MLE-bench graders, **15/15** against real `swebench` 5.0.2
+- [x] **514 tests, all passing with both upstreams installed** (494 pass / 20 skip without them)
 - [x] `mlea probe` — contamination probe with a working positive control
 - [x] `mlea dashboard` — comparative UI across every agent
 - [x] `mlea skills` — skill profiling against matched clean controls
 - [x] `mlea conform` — grader verified against 12 real MLE-bench competitions
-- [x] `mlea swe-conform` — SWE-bench resolver verified against the real grader (403 tests total)
+- [x] `mlea swe-conform` — SWE-bench resolver verified against the real grader
 - [ ] Plan reviewed
 - [ ] Phase 0 against real **Kaggle** data — grading, the submission contract and rejection
       behaviour are now verified against real competitions, but the *data* is still synthetic. Doable for **$0**, see

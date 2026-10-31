@@ -124,3 +124,9 @@ nothing here measures that.
 Running real instances needs the Docker images, which is a different kind of cost from the
 Kaggle credential problem on the MLE-bench side: it is heavy but not blocked. That is the
 obvious next step here.
+
+## Re-measured
+
+The 15/15 figure in this document was originally taken on a container where the grader's hardcoded `"python"` happened to resolve to the right interpreter. That bug, and a second one that graded length-preserving patches against stale bytecode, are described above. Both figures were re-measured from scratch afterwards on a clean container against swebench 5.0.2, and both reproduced exactly: **15/15**.
+
+A number that cannot be reproduced on a fresh machine is not a result, whatever it said the first time.

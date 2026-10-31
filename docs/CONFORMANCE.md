@@ -102,3 +102,9 @@ behaviour are the real ones** — not that an agent scoring well here would scor
 
 The remaining step is unchanged and still costs $0: point this at one real prepared
 competition. See [`SOTA-AND-FREE-TIER.md`](SOTA-AND-FREE-TIER.md).
+
+## Re-measured
+
+The 48/48 figure in this document was originally taken on a container where the grader's hardcoded `"python"` happened to resolve to the right interpreter. That bug, and a second one that graded length-preserving patches against stale bytecode, are described above. Both figures were re-measured from scratch afterwards on a clean container against a fresh clone of openai/mle-bench, and both reproduced exactly: **48/48**.
+
+A number that cannot be reproduced on a fresh machine is not a result, whatever it said the first time.
