@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import os
 import sys
 import time
@@ -175,12 +176,58 @@ def _write(path: Path, ids: list[str], preds: np.ndarray,
     tmp.replace(path)
 
 
-def _holdout_score(X: np.ndarray, y: np.ndarray, capacity: int, alpha: float,
-                   rng: np.random.Generator) -> float:
+def content_holdout(
+    X: np.ndarray, y: np.ndarray, frac: float = 0.75
+) -> tuple[np.ndarray, np.ndarray]:
+    """A train/validation split determined by row *content*, not row position.
+
+    Two bugs this replaces, both of which a positional split hides well.
+
+    **It made an honest agent look contaminated.** The split was
+    ``rng.permutation(n)`` from a fixed seed, so it selected row *positions*. A
+    clone that shuffles rows therefore trains on a different set of rows, selects
+    a different hyperparameter, and scores differently -- on data whose values are
+    byte-identical. In the contamination probe that showed up as an honest solver
+    gaining 13.8 leaderboard percentile points on a ``relabel`` clone whose
+    measured difficulty delta is exactly 0.000000, which is indistinguishable from
+    the memorisation effect the probe exists to detect.
+
+    **It compared hyperparameters on different validation sets.** One generator
+    was threaded through the whole search grid, so every candidate drew a fresh
+    permutation and the selection was partly a draw rather than a comparison.
+
+    Invariance is to both row order and column order: each row is keyed by a hash
+    of its **sorted** values together with its target, so permuting columns
+    permutes the values within a row without changing the multiset, and shuffling
+    rows cannot change which rows land in which half. Sorting by that key gives a
+    partition that is pseudo-random but fixed by the data.
+
+    Not invariant to rescaling the values, and should not be: a ``rescale`` clone
+    is a genuinely different dataset, which is why its difficulty delta is
+    measured rather than assumed.
+    """
     n = X.shape[0]
-    idx = rng.permutation(n)
-    cut = int(n * 0.75)
-    tr, va = idx[:cut], idx[cut:]
+    if not 0.0 < frac < 1.0:
+        raise ValueError("frac must be in (0, 1)")
+    if n < 2:
+        raise ValueError("a holdout split needs at least 2 rows")
+    keys = [
+        hashlib.blake2b(
+            np.ascontiguousarray(np.sort(row), dtype=np.float64).tobytes()
+            + np.float64(t).tobytes(),
+            digest_size=8,
+        ).digest()
+        for row, t in zip(X, y)
+    ]
+    order = np.argsort(np.array(keys, dtype="S8"), kind="stable")
+    cut = max(min(int(n * frac), n - 1), 1)
+    return order[:cut], order[cut:]
+
+
+def _holdout_score(X: np.ndarray, y: np.ndarray, capacity: int, alpha: float,
+                   rng: np.random.Generator | None = None) -> float:
+    """``rng`` is accepted and ignored -- the split is fixed by the data now."""
+    tr, va = content_holdout(X, y)
     beta = _ridge(_design(X[tr], capacity), y[tr], alpha)
     pred = _design(X[va], capacity) @ beta
     return float(-np.mean((y[va] - pred) ** 2))  # higher is better

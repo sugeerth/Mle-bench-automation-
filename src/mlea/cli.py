@@ -548,12 +548,54 @@ def _cmd_probe(args: argparse.Namespace) -> int:
         if not ok:
             problems.append(msg)
 
-    honest_gaps = [abs(g) for l, t, g, _ in verdicts if l == "honest" and g is not None]
+    # The negative control splits in two, because only half of it needs a
+    # threshold. A `relabel` clone is value-identical to its original, so an
+    # honest solver's gap on it must be *exactly* zero -- an exact check, not a
+    # tolerance. It was not zero until the reference agents stopped choosing
+    # their model-selection holdout by row position: a shuffled clone put
+    # different rows in the validation half, a different hyperparameter won, and
+    # an honest solver gained 13.8 percentile points on data whose bytes had not
+    # changed. That is indistinguishable from the effect the probe detects.
+    #
+    # A `rescale` clone genuinely has different values, so its difficulty match
+    # is empirical (see clone_difficulty_delta) and a tolerance is the honest
+    # form of the check there.
+    relabel_gap = result.gap("honest", "relabel")
     check(
-        bool(honest_gaps) and max(honest_gaps) < 0.10,
-        f"negative control: an honest solver shows no gap "
-        f"(worst |{max(honest_gaps):.1%}|)" if honest_gaps else
-        "negative control: an honest solver shows no gap",
+        relabel_gap is not None and abs(relabel_gap) < 1e-9,
+        f"negative control (exact): an honest solver's gap on a value-identical "
+        f"relabel clone is zero ({'n/a' if relabel_gap is None else f'{relabel_gap:+.4%}'})",
+    )
+    # For `rescale` the check is on the measured difficulty delta in *metric*
+    # units, not on the percentile gap, and the reason is worth stating because
+    # the obvious version of this check is wrong.
+    #
+    # The honest solver's percentile gap on a rescale clone runs to -8% or -13%
+    # and is reliably *negative*: rescaling perturbs the latent nonlinearity, so
+    # the clone really is slightly harder. In metric units that difference is
+    # ~0.0002. It becomes double-digit percentile points only because the
+    # simulated leaderboard is compressed into a band a couple of
+    # AUC-thousandths wide, which makes rank hypersensitive -- the same
+    # compression `mlea instrument` diagnosed in this generator. Thresholding the
+    # percentile gap therefore fails an honest solver for a difficulty change
+    # four decimal places down, and it fails it intermittently, which is the
+    # worst property a control can have.
+    #
+    # What the probe actually relies on is the *difference* between the arms:
+    # the honest solver is itself the difficulty control, so memoriser minus
+    # honest subtracts the difficulty change. That is the positive control
+    # below, and it passes robustly for exactly this reason.
+    rescale_honest = result.gap("honest", "rescale")
+    rescale_delta = max(abs(d) for d in deltas["rescale"]) if deltas["rescale"] else None
+    check(
+        rescale_delta is not None and rescale_delta <= args.max_delta,
+        f"negative control: the rescale clone is the same problem "
+        f"(difficulty delta |{rescale_delta:.6f}| in metric units, bar "
+        f"{args.max_delta:g}); an honest solver's percentile gap on it is "
+        f"{'n/a' if rescale_honest is None else f'{rescale_honest:+.1%}'}, which "
+        f"is difficulty, not recall"
+        if rescale_delta is not None else
+        "negative control: the rescale clone is the same problem",
     )
     mem_rescale = result.gap("memorizer", "rescale")
     honest_rescale = result.gap("honest", "rescale")

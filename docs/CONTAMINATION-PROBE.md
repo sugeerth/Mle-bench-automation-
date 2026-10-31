@@ -109,3 +109,49 @@ from the existing evidence, not a measurement of the real benchmark.
 5. Report the probe's own positive control alongside the result. A null from a probe of
    unknown sensitivity is not evidence of absence, which is the whole lesson of the 2024
    result.
+
+## The negative control was failing for a reason that was not contamination
+
+Found later, by an intermittent test failure rather than by the probe's own
+output: an honest solver was gaining **13.8 leaderboard percentile points** on a
+`relabel` clone whose measured difficulty delta is exactly `0.000000`. A relabel
+clone permutes and renames columns, shuffles rows and reissues ids; the values
+are byte-identical. An honest solver's gap on it must be zero.
+
+The cause was in the reference agents, not the probe. Model selection scored
+candidates on a holdout chosen by `rng.permutation(n)` from a fixed seed — that
+is, by row *position*. A clone that shuffles rows therefore trains on a
+different set of rows, a different hyperparameter wins, and the final model
+differs. The same mechanism also meant each candidate in the search grid drew a
+fresh permutation, so the hyperparameter comparison was partly a draw rather than
+a comparison.
+
+This is the same class of defect as the generator leaking column position: a
+positional dependence that manufactures an effect indistinguishable from the real
+one. It is worse here, because it was inside the control that certifies the probe
+works.
+
+Fixed by keying the split on row **content** — a hash of each row's sorted values
+and its target — which is invariant to both row order and column order. The
+honest solver's relabel gap is now exactly `+0.0000%`, so that half of the
+negative control is an **exact** check rather than a tolerance.
+
+### And the other half of the control was measuring the wrong quantity
+
+An honest solver's percentile gap on a `rescale` clone runs to −8% or −13%, and
+reliably *negative*. That is not noise and not recall: rescaling perturbs the
+latent nonlinearity, so the clone genuinely is slightly harder. In metric units
+the difference is about `0.0002`. It becomes double-digit **percentile** points
+only because the simulated leaderboard is compressed into a band a couple of
+AUC-thousandths wide — the same compression `mlea instrument` diagnosed in this
+generator.
+
+So the old check (`|honest gap| < 10%`) failed an honest solver for a difficulty
+change four decimal places down, and failed it *intermittently*, which is the
+worst property a control can have. The rescale arm now checks the measured
+difficulty delta in metric units and reports the percentile gap as context.
+
+What the probe actually relies on is the **difference** between the arms: the
+honest solver is itself the difficulty control, so memoriser minus honest
+subtracts the difficulty change. That is why the positive control passed robustly
+throughout.

@@ -479,3 +479,66 @@ def test_mirror_is_opt_in(tmp_path, data_dir):
                              'mkdir -p w && printf "a\\n1\\n" > w/submission.csv'),
                 task(data_dir), cfg(tmp_path))
     assert not r.has_submission
+
+
+# --- model selection must not depend on how the rows are ordered -------------
+
+
+def test_content_holdout_is_invariant_to_row_and_column_order():
+    """The split that made an honest agent look contaminated.
+
+    It was ``rng.permutation(n)`` from a fixed seed, so it chose row *positions*.
+    A clone that shuffles rows then trains on a different set of rows, selects a
+    different hyperparameter, and scores differently on data whose values are
+    byte-identical -- which is indistinguishable from memorisation.
+    """
+    import numpy as np
+
+    from mlea.baseline import content_holdout
+
+    rng = np.random.default_rng(0)
+    X = rng.normal(size=(120, 5))
+    y = rng.normal(size=120)
+    tr, va = content_holdout(X, y)
+    assert len(tr) + len(va) == 120
+    assert not set(tr) & set(va)
+
+    rows = rng.permutation(120)
+    tr_r, _ = content_holdout(X[rows], y[rows])
+    assert sorted(map(tuple, X[tr])) == sorted(map(tuple, X[rows][tr_r]))
+
+    cols = rng.permutation(5)
+    tr_c, _ = content_holdout(X[:, cols], y)
+    assert sorted(tr) == sorted(tr_c)
+
+
+def test_content_holdout_scores_every_candidate_on_the_same_split():
+    """The second half of the bug: one generator threaded through a search grid
+    gave each candidate a fresh permutation, so the selection was partly a draw
+    rather than a comparison."""
+    import numpy as np
+
+    from mlea.baseline import _holdout_score
+
+    rng = np.random.default_rng(1)
+    X = rng.normal(size=(100, 4))
+    y = X[:, 0] * 2 + rng.normal(0, 0.1, 100)
+    shared = np.random.default_rng(0)
+    first = _holdout_score(X, y, 1, 1.0, shared)
+    second = _holdout_score(X, y, 1, 1.0, shared)
+    assert first == second  # same inputs, same answer, whatever the generator did
+    assert _holdout_score(X, y, 1, 1.0) == first  # and it needs no generator
+
+
+def test_content_holdout_validates_its_inputs():
+    import numpy as np
+    import pytest as _pytest
+
+    from mlea.baseline import content_holdout
+
+    X = np.zeros((4, 2))
+    y = np.zeros(4)
+    with _pytest.raises(ValueError):
+        content_holdout(X, y, frac=0.0)
+    with _pytest.raises(ValueError):
+        content_holdout(X[:1], y[:1])
