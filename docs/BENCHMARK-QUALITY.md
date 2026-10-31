@@ -251,6 +251,9 @@ For anyone building or reporting on an ML-agent benchmark:
 5. **Publish a cost-fidelity frontier alongside the lite split.** Otherwise
    "lite" is chosen on intuition, and nobody can tell whether the cheap version
    answers the same question.
+6. **Then do all of it again on a difficulty scale**, because two of the
+   conclusions above do not survive one — see
+   [`docs/IRT-AND-ANCHORS.md`](IRT-AND-ANCHORS.md).
 
 ## Limits
 
@@ -265,9 +268,11 @@ For anyone building or reporting on an ML-agent benchmark:
 * The cost weights are human-hour proxies from upstream's tiering, not measured
   agent spend. A real cost vector can be passed to `cost_frontier`.
 * Ability here is the unweighted mean across competitions, matching how MLE-bench
-  reports. A full item-response model would estimate item difficulty and
-  discrimination jointly; with 25 subjects that is not identifiable, so classical
-  test theory is the honest ceiling on this data.
+  reports. **An earlier version of this section said a full item-response model
+  was "not identifiable" on 25 subjects. That was wrong** — the parameters are per
+  item, not per agent, and 25×75 cells carry 13,542 Bernoulli trials. It is fitted
+  in [`docs/IRT-AND-ANCHORS.md`](IRT-AND-ANCHORS.md), with parameter recovery at
+  this exact data shape, and it overturns the dead-item recommendation below.
 
 ## Commands
 

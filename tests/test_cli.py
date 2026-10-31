@@ -442,3 +442,45 @@ def test_instrument_frontier_places_lite_on_the_cost_curve(capsys):
     assert "cost-fidelity frontier" in out
     assert "MLE-bench Lite" in out
     assert "a random 22 of the same suite" in out
+
+
+def test_irt_reports_the_resolution_curve(capsys):
+    assert main(["irt", "--rows", "6", "--show", "2"]) == 0
+    out = capsys.readouterr().out
+    assert "75 competitions x 25 agents" in out
+    assert "medal rate" in out and "min gap" in out
+    assert "never solved" in out
+    # The eleven unplaceable competitions must be reported as one prior-determined
+    # value rather than as eleven findings.
+    assert "one prior-determined" in out
+
+
+def test_irt_model_comparison_prefers_the_two_parameter_model(capsys):
+    assert main(["irt", "--compare-models", "--folds", "3", "--rows", "2",
+                 "--show", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "held-out predictive log-likelihood" in out
+    assert "best: 2pl" in out
+
+
+def test_irt_seeds_flag_moves_the_resolution_limit(capsys):
+    assert main(["irt", "--seeds", "12", "--rows", "2", "--show", "1"]) == 0
+    high = capsys.readouterr().out
+    assert main(["irt", "--seeds", "3", "--rows", "2", "--show", "1"]) == 0
+    low = capsys.readouterr().out
+
+    def limit(text):
+        line = next(l for l in text.splitlines() if "expected medal rate" in l)
+        return float(line.rsplit("of ", 1)[1].rstrip("%)").rstrip("%"))
+
+    assert limit(high) > limit(low)
+
+
+def test_anchor_head_to_head_puts_the_estimator_ahead_of_the_selection(capsys):
+    assert main(["anchor", "-k", "15", "--selector", "stratified",
+                 "--selector", "max_information", "--repeats", "1",
+                 "--max-agents", "8"]) == 0
+    out = capsys.readouterr().out
+    assert "leave-one-agent-out over 8 agents" in out
+    assert "pirt" in out and "naive" in out
+    assert "the estimator, not the selection" in out

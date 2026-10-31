@@ -23,6 +23,9 @@ from .bench import (
     make_competition,
     make_suite,
 )
+from .anchor import estimate_ability, predict_full_rate
+from .irt import IRTModel, ItemParameters, calibrate_attenuation
+from .irt import fit as fit_irt
 from .instrument import (
     InstrumentReport,
     ItemStats,
@@ -64,7 +67,9 @@ __all__ = [
     "METRICS",
     "SUITE",
     "DISCRIMINATING_SUITE",
+    "IRTModel",
     "InstrumentReport",
+    "ItemParameters",
     "ItemStats",
     "DESIGNS",
     "Design",
@@ -84,6 +89,10 @@ __all__ = [
     "TriageResult",
     "__version__",
     "analyse",
+    "calibrate_attenuation",
+    "estimate_ability",
+    "fit_irt",
+    "predict_full_rate",
     "assert_comparable",
     "assert_retry_allowed",
     "classify",

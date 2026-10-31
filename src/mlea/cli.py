@@ -1090,6 +1090,40 @@ def build_parser() -> argparse.ArgumentParser:
                     help="repeatable; defaults to every reference agent")
     sw.set_defaults(func=_cmd_swe_conform)
 
+    ir = sub.add_parser(
+        "irt", help="item-response model of the benchmark: where is it sharp?")
+    ir.add_argument("--seeds", type=float, default=3.0,
+                    help="seeds per competition assumed when reporting resolution")
+    ir.add_argument("--target-se", type=float, default=0.15,
+                    help="resolution bar, in SD of published agent ability")
+    ir.add_argument("--rows", type=int, default=22)
+    ir.add_argument("--show", type=int, default=6)
+    ir.add_argument("--calibrate", action="store_true",
+                    help="measure this design's own estimation bias by refitting "
+                         "data the fitted model generated")
+    ir.add_argument("--draws", type=int, default=12)
+    ir.add_argument("--compare-models", action="store_true",
+                    help="held-out log-likelihood against Rasch and item-mean")
+    ir.add_argument("--folds", type=int, default=5)
+    ir.add_argument("--seed", type=int, default=0)
+    ir.set_defaults(func=_cmd_irt)
+
+    an = sub.add_parser(
+        "anchor",
+        help="can a cheap subset estimate the full benchmark score? head-to-head")
+    an.add_argument("-k", type=int, nargs="+", default=[10, 20, 30],
+                    help="subset sizes to compare")
+    an.add_argument("--selector", action="append",
+                    help="repeatable; defaults to all five")
+    an.add_argument("--repeats", type=int, default=3,
+                    help="repeats for the randomised selectors")
+    an.add_argument("--seed", type=int, default=0)
+    an.add_argument("--max-agents", type=int,
+                    help="thin the agent list; every fold refits, so runtime is "
+                         "linear in agents")
+    an.add_argument("-v", "--verbose", action="store_true")
+    an.set_defaults(func=_cmd_anchor)
+
     ins = sub.add_parser(
         "instrument",
         help="measure the benchmark itself: what can it actually resolve?")
@@ -1375,6 +1409,159 @@ def _instrument_suite(args: argparse.Namespace):
         print(f"   {spec.id:28} " +
               " ".join(f"{a[:4]}={M[i, j]:.2f}" for i, a in enumerate(agents)))
     return M, [s.id for s in specs], agents
+
+
+# --- irt / anchor: the model-based view ------------------------------------
+
+
+def _cmd_irt(args: argparse.Namespace) -> int:
+    """Fit an item-response model to the published benchmark and report its shape.
+
+    The question classical test theory cannot answer: a benchmark is not
+    uniformly sharp, and this says *where* it resolves ability and where it does
+    not -- in medal-rate units, which is the scale people quote.
+    """
+    from . import reference
+    from .irt import calibrate_attenuation, fit, held_out_loglik
+
+    rates, seeds, exps, comps = reference.matrix()
+    M = np.array(rates)
+    N = np.array(seeds, dtype=float)
+    S = np.rint(M * N)
+    model = fit(S, N, comps, exps, complexity=reference.complexity())
+    if not model.converged:
+        print(f"warning: EM stopped at {model.n_iterations} iterations without "
+              f"converging", file=sys.stderr)
+
+    lo, hi = model.ability_range
+    print(f"2PL fit: {len(model.items)} competitions x {len(model.subjects)} agents, "
+          f"{int(N.sum())} agent-runs")
+    print(f"   log-likelihood {model.log_likelihood:.1f} after {model.n_iterations} "
+          f"EM iterations")
+    print(f"   ability spans {lo:+.2f} to {hi:+.2f} (1 unit = 1 SD of published "
+          f"agent ability)")
+    print(f"   marginal reliability {model.marginal_reliability(seeds=args.seeds):.4f} "
+          f"at {args.seeds:g} seeds")
+    print(f"   {len(model.located_items)} competitions located, "
+          f"{len(model.unidentified_items)} unplaceable (never solved), "
+          f"{len(model.extrapolated_items)} with a slope too flat to place")
+
+    att = None
+    if args.calibrate:
+        print(f"\ncalibrating this design's own bias ({args.draws} parametric "
+              f"bootstrap refits)...")
+        att = calibrate_attenuation(model, N, n_draws=args.draws,
+                                    rng=np.random.default_rng(args.seed))
+        print(f"   {att}")
+        model = replace(model, attenuation=att.slope)
+
+    print(f"\nwhat the benchmark can resolve, at {args.seeds:g} seeds per competition")
+    print(f"   {'ability':>8} {'medal rate':>11} {'SE':>7} {'min gap':>9}")
+    # The slope of the expected-rate curve is computed on a fine grid and then
+    # sampled down for display. Differencing the display rows directly made the
+    # reported gap depend on --rows: at 4 rows the first entry read 9.1pp and at
+    # 22 rows the same ability read 2.3pp, because np.gradient was measuring the
+    # row spacing rather than the curve.
+    fine = np.linspace(lo - 0.4, hi + 0.8, 2001)
+    fine_rate = model.expected_rate(fine)
+    fine_se = model.standard_error(fine, seeds=args.seeds)
+    # Two agents each measured with this SE differ detectably at 95% when their
+    # abilities are 1.96*sqrt(2) standard errors apart; converted to medal-rate
+    # units through the slope of the expected-rate curve.
+    fine_gap = 2.77 * fine_se * np.gradient(fine_rate, fine)
+    grid = np.linspace(lo - 0.4, hi + 0.8, args.rows)
+    pick = np.searchsorted(fine, grid).clip(0, len(fine) - 1)
+    rate, se, gap = fine_rate[pick], fine_se[pick], fine_gap[pick]
+    for t, rr, ss, gg in zip(grid, rate, se, gap):
+        here = "  <- agents measured here" if lo <= t <= hi else ""
+        print(f"   {t:8.2f} {rr * 100:10.1f}% {ss:7.3f} {gg * 100:8.1f}pp{here}")
+
+    blind = model.blind_above(args.target_se, seeds=args.seeds)
+    if blind is None:
+        print(f"\nno ability is resolved to SE <= {args.target_se}")
+    else:
+        at = float(model.expected_rate(blind)[0])
+        print(f"\nresolved to SE <= {args.target_se:g} up to ability {blind:+.2f}, "
+              f"an expected medal rate of {at * 100:.1f}%")
+    if att is not None:
+        print(f"   (uncorrected; the calibration says slopes come back "
+              f"{(1 - att.slope) * 100:.0f}% shallow, so the real benchmark is "
+              f"sharper than this)")
+
+    print(f"\nhardest competitions that can be placed at all")
+    for item in sorted(model.located_items, key=lambda i: -i.b)[: args.show]:
+        print(f"   b={item.b:+6.2f} a={item.a:5.2f} rate={item.observed_rate:5.1%} "
+              f"{item.complexity or '-':6} {item.item}")
+    if model.unidentified_items:
+        b = model.unidentified_items[0].b
+        print(f"\n{len(model.unidentified_items)} competitions no agent has ever "
+              f"solved. All land at difficulty {b:+.2f} -- one prior-determined")
+        print(f"value, not {len(model.unidentified_items)} measurements. They sit "
+              f"above every placeable competition (hardest "
+              f"{max(i.b for i in model.located_items):+.2f}) and above every "
+              f"measured agent.")
+        for item in model.unidentified_items[: args.show]:
+            print(f"   {item.complexity or '-':6} {item.item}")
+
+    if args.compare_models:
+        print(f"\nheld-out predictive log-likelihood per trial ({args.folds} folds)")
+        out = held_out_loglik(S, N, comps, exps, n_folds=args.folds,
+                              rng=np.random.default_rng(args.seed))
+        for name in ("2pl", "rasch", "item_mean"):
+            print(f"   {name:10} {out[name]:+.5f}")
+        best = max(out, key=out.get)
+        print(f"   best: {best}. A model that cannot beat item_mean on cells it "
+              f"never saw has bought nothing.")
+    return 0
+
+
+def _cmd_anchor(args: argparse.Namespace) -> int:
+    """Head-to-head: how well does a cheap subset estimate the full-suite score?
+
+    Not the ranking question -- the score question, which is the one that makes a
+    number comparable to a published one. Every selector is compared against
+    every estimator, leave-one-agent-out, so nothing is scored on results it was
+    chosen with.
+    """
+    from . import anchor as anchor_mod
+    from . import reference
+
+    rates, seeds, exps, comps = reference.matrix()
+    N = np.array(seeds, dtype=float)
+    S = np.rint(np.array(rates) * N)
+    if args.max_agents and args.max_agents < len(exps):
+        # Every fold refits the model, so cost is linear in agents. Thinning
+        # evenly rather than taking a prefix keeps the ability range intact,
+        # which is what the comparison depends on.
+        step = len(exps) / args.max_agents
+        keep = sorted({int(i * step) for i in range(args.max_agents)})
+        S, N = S[keep], N[keep]
+        exps = [exps[i] for i in keep]
+        print(f"thinned to {len(exps)} agents (--max-agents)")
+    ks = tuple(args.k)
+    print(f"leave-one-agent-out over {len(exps)} agents, {len(comps)} competitions")
+    print(f"selectors: {', '.join(args.selector or anchor_mod.SELECTORS)}")
+    print(f"k: {', '.join(str(k) for k in ks)}\n")
+    res = anchor_mod.evaluate(
+        S, N, comps, exps, ks=ks, selectors=args.selector,
+        n_repeats=args.repeats, rng=np.random.default_rng(args.seed),
+        progress=(lambda m: print(m, flush=True)) if args.verbose else None,
+    )
+    for k in ks:
+        print(f"k={k}  (error in predicting the full {len(comps)}-competition rate)")
+        for row in sorted((r for r in res if r.k == k), key=lambda r: r.mae):
+            print(f"   {row}")
+        print()
+    best = min(res, key=lambda r: r.mae)
+    print(f"best: {best.selector} + {best.estimator} at k={best.k}, "
+          f"MAE {best.mae * 100:.2f}pp")
+    naive_best = min((r for r in res if r.estimator == "naive"),
+                     key=lambda r: r.mae, default=None)
+    if naive_best is not None and best.estimator == "pirt":
+        print(f"the best subset-mean result is {naive_best.selector} at "
+              f"k={naive_best.k}, MAE {naive_best.mae * 100:.2f}pp -- so the "
+              f"estimator, not the selection, is where the accuracy comes from.")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -7,8 +7,9 @@ repeatably, cheaply, and as a regression signal rather than a one-off leaderboar
 
 Both graders are **verified against the real upstream graders**: 48/48 exact on 12 real
 MLE-bench competitions, 15/15 on the full SWE-bench resolution breakdown. And the benchmarks
-themselves are measured, not assumed: `mlea instrument` finds that 29 of MLE-bench's 75
-competitions carry zero information about the eight strongest published agents.
+themselves are measured, not assumed: MLE-bench is sharpest at a 38.9% medal rate and its
+resolution has already halved under the strongest published agent, with about 3.6 points of
+headroom left at three seeds per competition.
 
 ## `mlea` — a working eval pipeline
 
@@ -149,6 +150,65 @@ mlea power --design lite-regression
 mlea dashboard runs/nightly -o dashboard.html
 ```
 
+### `mlea irt` / `mlea anchor` — where the benchmark goes blind, on a difficulty scale
+
+Classical test theory gives one reliability number for a whole population, and that single
+number is what is wrong with it. A benchmark resolves ability well in some range and not at all
+outside it, and the range moves as agents improve. So: a **two-parameter item-response model**
+fitted by marginal maximum likelihood, putting all 75 competitions and all 25 published agents
+on one scale. It beats Rasch and the CTT-implied item-mean baseline on held-out cells
+(−0.198 / −0.279 / −0.409 log-likelihood per trial), and parameter recovery at this exact data
+shape is in the tests.
+
+```
+    ability  medal rate      SE   min gap
+       0.25       36.7%   0.061      5.3pp   <- near the minimum (exactly at +0.33, 38.9%)
+       2.30       77.1%   0.110      3.9pp   <- strongest published agent
+       2.71       81.3%   0.149      3.4pp
+```
+
+- **MLE-bench is sharpest at a 38.9% medal rate, and its resolution halves by 78.7%.** The
+  strongest published agent is at 77.8% — the halving point is already underneath it.
+- At three seeds it resolves ability up to an **81.4%** medal rate, so about **3.6 points of
+  headroom** above current SOTA.
+- **The lever is seeds, not harder competitions.** 6 seeds moves the limit to 90.8%, 12 seeds to
+  96.4%. The competitions to run them on already exist; at constant budget the
+  retire-and-reseed swap is worth +0.3 points, and real extension costs ~2× budget for 10 points.
+
+**It also overturned the previous round's headline recommendation.** CTT said the 11
+never-medalled competitions were 19% of cost for zero information — retire them. On a difficulty
+scale they are the *only* competitions sitting above the frontier (+4.3 against +2.7 for the
+hardest placeable one). They are the benchmark's entire reserve of headroom. CTT structurally
+could not see this: a competition nobody solves and a competition that tells you nothing both
+have zero variance.
+
+Then the question practitioners actually have — not "does a subset rank agents the same way"
+but **"if I run 20 of the 75, what is my number on all 75?"** `mlea anchor` implements
+anchor-point estimation (the `tinyBenchmarks` method) and measures it against four alternatives,
+leave-one-agent-out:
+
+```
+k=20  (error in predicting the full 75-competition medal rate)
+   stratified       pirt   MAE  2.31pp  bias  -0.57pp
+   greedy_alpha     pirt   MAE  3.19pp  bias  +0.73pp
+   stratified       naive  MAE  3.44pp  bias  +2.59pp
+   max_information  naive  MAE 20.31pp  bias +16.56pp
+```
+
+**The estimator matters about twenty times more than the selection.** Across all five selection
+rules p-IRT spans 2.31–3.19pp; raw subset averaging spans 3.44–24.92pp. The mechanism is bias,
+not noise: an information-optimised subset overstates the full-suite rate by 16.6 points,
+systematically, every time. And this repo's own `greedy_alpha` — built for *ranking* — is the
+worst p-IRT selector at small k, which is the kind of thing you only learn by running your
+method against alternatives instead of assuming it generalised.
+
+Full method, numbers and limits: [`docs/IRT-AND-ANCHORS.md`](docs/IRT-AND-ANCHORS.md).
+
+```bash
+mlea irt --compare-models --calibrate   # resolution curve, model comparison, own-bias estimate
+mlea anchor -k 5 10 20 30 45            # the head-to-head
+```
+
 ### `mlea instrument` — measuring the benchmark instead of the agent
 
 Everything else here asks how good an agent is. This asks whether the benchmark can tell.
@@ -170,6 +230,8 @@ MLE-bench is a genuinely good instrument — and it is eroding from both ends. R
 
 - **29 of 75 competitions carry zero information** about them — 18 because all eight medal
   every time, 11 because no published agent ever has. That is 37% of the suite's cost.
+  (The 11 are *not* dead weight to retire — see the difficulty-scale section above, which
+  overturns that reading.)
 - **MLE-bench Lite is more than half dead at the frontier:** 12 of its 22 competitions cannot
   separate any of the eight, leaving 2.9 resolvable ability levels behind numbers that get
   reported to three decimals.
@@ -349,6 +411,7 @@ Everything else here is **planning documents**.
 | [`docs/SOTA-AND-FREE-TIER.md`](docs/SOTA-AND-FREE-TIER.md) | Current SOTA on the benchmark, and a $0 recipe for getting a pipeline working |
 | [`docs/POWER-FINDINGS.md`](docs/POWER-FINDINGS.md) | What our sweeps can and cannot detect — output of the tool below |
 | [`docs/BENCHMARK-QUALITY.md`](docs/BENCHMARK-QUALITY.md) | Measuring the benchmark itself: what MLE-bench can resolve, what its dead weight costs, and the three defects this found in our own suite |
+| [`docs/IRT-AND-ANCHORS.md`](docs/IRT-AND-ANCHORS.md) | The same questions on a difficulty scale: where MLE-bench goes blind, why more seeds beat harder tasks, and the two conclusions this overturned |
 | [`docs/CONFORMANCE.md`](docs/CONFORMANCE.md) | Checked against 12 **real** MLE-bench competitions and their own graders — 48/48 exact |
 | [`docs/SWE-BENCH.md`](docs/SWE-BENCH.md) | The same treatment for SWE-bench — 15/15 against the real grader, and the bug it found |
 | [`docs/SELFTEST.md`](docs/SELFTEST.md) | How the generated competitions work, and what the self-test proved |
@@ -392,6 +455,7 @@ paying that bill more often than you have to — see [Cost model](docs/PLAN.md#5
 - [x] Log signatures and agent contracts verified against primary sources
 - [x] `mlea bench` / `grade` / `selftest` — the pipeline runs end to end for real
 - [x] `mlea instrument` — psychometrics of the benchmark itself, and the suite rebuild it forced
+- [x] `mlea irt` / `mlea anchor` — item-response model and anchor-point estimation, which overturned two of the above
 - [x] `mlea probe` — contamination probe with a working positive control
 - [x] `mlea dashboard` — comparative UI across every agent
 - [x] `mlea skills` — skill profiling against matched clean controls
